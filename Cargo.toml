@@ -1,0 +1,24 @@
+[package]
+name = "beta_k1"
+version = "0.1.0"
+edition = "2021"
+
+[features]
+default = ["pow"]
+# Direct u.powf(1/k). Fast on hardware with a fast libm pow.
+pow = []
+# Exp(1) rejection sampling. May win on hardware with slow pow but
+# adequate log/exp; verify on target before relying on this.
+rejection = []
+
+[dependencies]
+rand = "0.8"
+rand_distr = "0.4"
+
+[[bin]]
+name = "test_driver"
+path = "src/main.rs"
+
+[lib]
+name = "beta_k1"
+path = "src/lib.rs"
