@@ -18,7 +18,7 @@
 
 use beta_k1::{
     beta_k_1_max_of_uniforms, beta_k_1_pow, beta_k_1_rejection, resample_indices,
-    verify_acceptance_bound, BetaFloat, SortedUniforms,
+    resample_indices_buffered, verify_acceptance_bound, BetaFloat, SortedUniforms,
 };
 use num_traits::Float;
 use rand::rngs::StdRng;
@@ -41,43 +41,8 @@ fn main() {
     println!();
 
     // Tests that exercise the actual implementation: run once per type.
-    for &ty in &["f32", "f64"] {
-        if ty == "f32" {
-            all_passed &= test_range::<f32>(ty);
-            println!();
-            all_passed &= test_moments::<f32>(ty);
-            println!();
-            all_passed &= test_ks_against_theory::<f32>(ty);
-            println!();
-            all_passed &= test_ks_against_max_oracle::<f32>(ty);
-            println!();
-            all_passed &= test_sorted_uniforms_moments::<f32>(ty);
-            println!();
-            all_passed &= test_sorted_uniforms_pooled_ks::<f32>(ty);
-            println!();
-            all_passed &= test_resample_marginals::<f32>(ty);
-            println!();
-            all_passed &= test_resample_vs_multinomial::<f32>(ty);
-            println!();
-        } else {
-            all_passed &= test_range::<f64>(ty);
-            println!();
-            all_passed &= test_moments::<f64>(ty);
-            println!();
-            all_passed &= test_ks_against_theory::<f64>(ty);
-            println!();
-            all_passed &= test_ks_against_max_oracle::<f64>(ty);
-            println!();
-            all_passed &= test_sorted_uniforms_moments::<f64>(ty);
-            println!();
-            all_passed &= test_sorted_uniforms_pooled_ks::<f64>(ty);
-            println!();
-            all_passed &= test_resample_marginals::<f64>(ty);
-            println!();
-            all_passed &= test_resample_vs_multinomial::<f64>(ty);
-            println!();
-        }
-    }
+    all_passed &= run_typed_tests::<f32>("f32");
+    all_passed &= run_typed_tests::<f64>("f64");
 
     bench();
 
@@ -98,6 +63,46 @@ fn main() {
 #[inline]
 fn to_f64<F: Float>(x: F) -> f64 {
     x.to_f64().unwrap()
+}
+
+/// Run all per-type tests for a given float type.
+///
+/// Tests 8 and 9 are run twice — once each for the streaming
+/// (`resample_indices`) and buffered (`resample_indices_buffered`)
+/// resamplers — using a closure to abstract over the call shape.
+fn run_typed_tests<F: BetaFloat>(label: &str) -> bool {
+    let mut ok = true;
+    ok &= test_range::<F>(label);
+    println!();
+    ok &= test_moments::<F>(label);
+    println!();
+    ok &= test_ks_against_theory::<F>(label);
+    println!();
+    ok &= test_ks_against_max_oracle::<F>(label);
+    println!();
+    ok &= test_sorted_uniforms_moments::<F>(label);
+    println!();
+    ok &= test_sorted_uniforms_pooled_ks::<F>(label);
+    println!();
+    ok &= test_resample_marginals::<F, _>(label, "streaming", |rng, w, o| {
+        resample_indices::<F, _>(rng, w, o)
+    });
+    println!();
+    ok &= test_resample_marginals::<F, _>(label, "buffered", |rng, w, o| {
+        let mut scratch = vec![F::zero(); o.len()];
+        resample_indices_buffered::<F, _>(rng, w, o, &mut scratch)
+    });
+    println!();
+    ok &= test_resample_vs_multinomial::<F, _>(label, "streaming", |rng, w, o| {
+        resample_indices::<F, _>(rng, w, o)
+    });
+    println!();
+    ok &= test_resample_vs_multinomial::<F, _>(label, "buffered", |rng, w, o| {
+        let mut scratch = vec![F::zero(); o.len()];
+        resample_indices_buffered::<F, _>(rng, w, o, &mut scratch)
+    });
+    println!();
+    ok
 }
 
 /// Test 1: A_k(Y) ≤ 1 across the support, i.e. M_k is correctly computed.
@@ -428,12 +433,20 @@ fn weights_from_f64<F: BetaFloat>(ws: &[f64]) -> Vec<F> {
     ws.iter().map(|&w| F::from(w).unwrap()).collect()
 }
 
-/// Test 8: Marginal index probabilities under `resample_indices` match
-/// the weight-proportional probabilities, by chi-squared goodness-of-fit.
-fn test_resample_marginals<F: BetaFloat>(label: &str) -> bool {
+/// Test 8: Marginal index probabilities under the supplied resampler
+/// match the weight-proportional probabilities, by chi-squared
+/// goodness-of-fit. Runs once per resampler (streaming, buffered).
+fn test_resample_marginals<F: BetaFloat, Resampler>(
+    label: &str,
+    method: &str,
+    mut resample: Resampler,
+) -> bool
+where
+    Resampler: FnMut(&mut StdRng, &[F], &mut [usize]),
+{
     println!(
-        "[Test 8] Resampling: index marginal probabilities (chi-squared) [{}]",
-        label
+        "[Test 8] Resampling: index marginal probabilities (chi-squared) [{}/{}]",
+        label, method
     );
     let mut rng = StdRng::seed_from_u64(0xFEED_BEEF);
     let mut all_ok = true;
@@ -461,7 +474,7 @@ fn test_resample_marginals<F: BetaFloat>(label: &str) -> bool {
         let mut counts = vec![0u64; m];
         let mut buf = vec![0usize; n_per_run];
         for _ in 0..n_runs {
-            resample_indices::<F, _>(&mut rng, &weights, &mut buf);
+            resample(&mut rng, &weights, &mut buf);
             for &idx in &buf {
                 counts[idx] += 1;
             }
@@ -501,11 +514,18 @@ fn test_resample_marginals<F: BetaFloat>(label: &str) -> bool {
 }
 
 /// Test 9: Resampling matches naive multinomial sampling, by two-sample
-/// chi-squared on the index-count vectors.
-fn test_resample_vs_multinomial<F: BetaFloat>(label: &str) -> bool {
+/// chi-squared on the index-count vectors. Runs once per resampler.
+fn test_resample_vs_multinomial<F: BetaFloat, Resampler>(
+    label: &str,
+    method: &str,
+    mut resample: Resampler,
+) -> bool
+where
+    Resampler: FnMut(&mut StdRng, &[F], &mut [usize]),
+{
     println!(
-        "[Test 9] Resampling matches naive multinomial (two-sample χ²) [{}]",
-        label
+        "[Test 9] Resampling matches naive multinomial (two-sample χ²) [{}/{}]",
+        label, method
     );
     let mut rng_a = StdRng::seed_from_u64(0xA1A1_A1A1);
     let mut rng_b = StdRng::seed_from_u64(0xB2B2_B2B2);
@@ -531,7 +551,7 @@ fn test_resample_vs_multinomial<F: BetaFloat>(label: &str) -> bool {
         let mut buf = vec![0usize; n_per_run];
 
         for _ in 0..n_runs {
-            resample_indices::<F, _>(&mut rng_a, &weights, &mut buf);
+            resample(&mut rng_a, &weights, &mut buf);
             for &idx in &buf {
                 counts_a[idx] += 1;
             }
@@ -642,33 +662,62 @@ fn bench_typed<F: BetaFloat>(label: &str) {
 fn bench_resample_typed<F: BetaFloat>(label: &str) {
     println!("[Bench] Full resampling pipeline (m = n) [{}]", label);
     println!(
-        "  {:>8}  {:>14}  {:>14}",
-        "m = n", "ns/call", "ns/step (m+n)"
+        "  {:>8}  {:>14}  {:>14}  {:>14}  {:>14}  {:>10}",
+        "m = n", "C ns/call", "C ns/step", "B ns/call", "B ns/step", "C/B"
     );
 
     for &m in &[100usize, 1_000, 10_000, 100_000] {
         let weights: Vec<F> = (1..=m).map(|x| F::from(x).unwrap()).collect();
         let n = m;
         let mut out = vec![0usize; n];
-        let mut rng = StdRng::seed_from_u64(0x1234);
-
-        for _ in 0..3 {
-            resample_indices::<F, _>(&mut rng, &weights, &mut out);
-        }
+        let mut scratch = vec![F::zero(); n];
 
         let n_runs = ((30_000_000 / (m + n)).max(3)) as u64;
+
+        // Streaming (Method C).
+        let mut rng_c = StdRng::seed_from_u64(0x1234);
+        for _ in 0..3 {
+            resample_indices::<F, _>(&mut rng_c, &weights, &mut out);
+        }
         let t0 = Instant::now();
         for _ in 0..n_runs {
             resample_indices::<F, _>(
-                black_box(&mut rng),
+                black_box(&mut rng_c),
                 black_box(&weights),
                 black_box(&mut out),
             );
         }
-        let elapsed = t0.elapsed();
-        let ns_per_call = elapsed.as_nanos() as f64 / n_runs as f64;
-        let ns_per_step = ns_per_call / (m + n) as f64;
-        println!("  {:>8}  {:>14.0}  {:>14.2}", m, ns_per_call, ns_per_step);
+        let elapsed_c = t0.elapsed();
+        let ns_call_c = elapsed_c.as_nanos() as f64 / n_runs as f64;
+        let ns_step_c = ns_call_c / (m + n) as f64;
+
+        // Buffered (Method B).
+        let mut rng_b = StdRng::seed_from_u64(0x1234);
+        for _ in 0..3 {
+            resample_indices_buffered::<F, _>(&mut rng_b, &weights, &mut out, &mut scratch);
+        }
+        let t0 = Instant::now();
+        for _ in 0..n_runs {
+            resample_indices_buffered::<F, _>(
+                black_box(&mut rng_b),
+                black_box(&weights),
+                black_box(&mut out),
+                black_box(&mut scratch),
+            );
+        }
+        let elapsed_b = t0.elapsed();
+        let ns_call_b = elapsed_b.as_nanos() as f64 / n_runs as f64;
+        let ns_step_b = ns_call_b / (m + n) as f64;
+
+        println!(
+            "  {:>8}  {:>14.0}  {:>14.2}  {:>14.0}  {:>14.2}  {:>9.2}x",
+            m,
+            ns_call_c,
+            ns_step_c,
+            ns_call_b,
+            ns_step_b,
+            ns_call_c / ns_call_b
+        );
     }
 }
 

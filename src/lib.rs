@@ -407,6 +407,11 @@ impl<'a, F: BetaFloat, R: Rng + ?Sized> Iterator for SortedUniforms<'a, F, R> {
 /// the same bound is `n · 2⁻⁵²`, negligible for any realistic `n`.
 /// See the crate-level "Float type tradeoffs" section.
 ///
+/// # See also
+/// [`resample_indices_buffered`] — same statistical contract, faster
+/// per element on hardware with a slow `pow`, but requires an extra
+/// scratch buffer of length `n`.
+///
 /// # Panics
 /// Panics in debug if preconditions are violated. Always panics if
 /// `weights.is_empty()`.
@@ -451,5 +456,140 @@ pub fn resample_indices<F: BetaFloat, R: Rng + ?Sized>(
             cumulative = cumulative + weights[j];
         }
         *slot = j;
+    }
+}
+
+/// Buffered weighted resampler ("Method B"): same statistical contract
+/// as [`resample_indices`], faster on hardware with a slow `pow`, but
+/// requires a caller-supplied scratch buffer of length `out.len()`.
+///
+/// # Algorithm
+/// Draw `n + 1` Exp(1) variates `E_1, …, E_{n+1}`. Let
+/// `G = E_1 + … + E_{n+1}` and `S_i = E_1 + … + E_i`. Then
+/// `U_(i) = S_i / G` for `i = 1, …, n` are exactly the order
+/// statistics of `n` i.i.d. Uniform(0, 1) draws (a standard result on
+/// Gamma / Beta distribution ratios). The algorithm fills `scratch`
+/// with the first `n` Exp draws, accumulates `G` (with the (n+1)-th
+/// draw added but not stored), then walks `scratch` left-to-right
+/// computing `S_i / G` and merging against the cumulative weight
+/// vector.
+///
+/// Compared to [`resample_indices`] (streaming "Method C"):
+///
+/// - **No `pow` per element.** Method C calls `beta_k_1` once per
+///   output index; the `pow` backend dominates per-call cost. Method B
+///   replaces this with an Exp(1) draw plus a multiplication by
+///   `1/G` — typically several times faster, especially on hardware
+///   without a fast vectorized `powf`.
+/// - **Needs scratch.** Caller supplies `&mut [F]` of length
+///   `out.len()`. On 32-bit MCU with `F = f32` and using a separate
+///   output buffer, this costs `4n` extra bytes.
+/// - **Same statistical contract.** Both methods produce indices
+///   distributed as i.i.d. multinomial draws on `weights`, in
+///   ascending order.
+///
+/// # Numerical robustness
+/// Both `G` and the running prefix sum `cumulative_e` are accumulated
+/// using Kahan summation. Without compensation, the `f32` accumulator
+/// would accrue `O(n · 2⁻²⁴)` relative error — about 6% at `n = 10⁶`,
+/// enough to perceptibly bias `U_(i)`. With Kahan, the error reduces
+/// to `O(2⁻²⁴ · max|E_i|) ≈ O(ln n / 2²⁴)`, effectively constant.
+/// `f64` doesn't need it for any realistic `n`, but the cost is
+/// negligible (a few extra adds per element) so it is unconditional.
+///
+/// The merge target is computed as `(total * u).min(total)`. The
+/// `.min` clips the rare floating-point case where `u_n = S_n / G`
+/// rounds up to `1.0` (in `f32`, this happens when `E_{n+1}/G` falls
+/// below `~2⁻²⁵`, which has probability `~3%` at `n = 10⁶`).
+/// Combined with same-order accumulation of `total` and the merge's
+/// `cumulative_w`, this guarantees the merge loop terminates within
+/// `weights.len()` without an explicit bounds check.
+///
+/// # Preconditions
+/// - `weights` is nonempty.
+/// - `scratch.len() == out.len()`.
+/// - All entries of `weights` are finite and nonnegative.
+/// - The sum of `weights` is strictly positive.
+///
+/// # Precision
+/// With `F = f32` the prefix-sum-of-weights accumulator accrues
+/// `O(n · 2⁻²⁴)` relative error; recommended `n ≤ 2¹⁶`. Beyond that
+/// switch to `F = f64`. The Kahan-protected `G` and `cumulative_e`
+/// accumulators introduced by this routine are not the limiting
+/// factor — the weight sum is.
+///
+/// # Panics
+/// Panics if `weights.is_empty()` or if `scratch.len() != out.len()`.
+/// Panics in debug if weights are non-finite/negative or sum to zero.
+pub fn resample_indices_buffered<F: BetaFloat, R: Rng + ?Sized>(
+    rng: &mut R,
+    weights: &[F],
+    out: &mut [usize],
+    scratch: &mut [F],
+) {
+    assert!(!weights.is_empty(), "weights must be nonempty");
+    assert_eq!(
+        scratch.len(),
+        out.len(),
+        "scratch length must equal out length"
+    );
+
+    if out.is_empty() {
+        return;
+    }
+
+    // Same-order accumulation invariant (see Lemma 3 in README): walk
+    // `weights` here in index order, then again in the merge below, so
+    // the final `cumulative_w` equals `total` bit-for-bit.
+    let mut total = F::zero();
+    for &w in weights {
+        debug_assert!(
+            w.is_finite() && w >= F::zero(),
+            "weight must be finite and ≥ 0"
+        );
+        total = total + w;
+    }
+    debug_assert!(total > F::zero(), "total weight must be strictly positive");
+
+    // Phase 1: fill scratch with E_1..E_n, Kahan-accumulate G including
+    // E_{n+1}. Storing E_{n+1} is unnecessary — we only need its
+    // contribution to G so that S_n / G < 1 strictly.
+    let mut g = F::zero();
+    let mut g_c = F::zero();
+    for slot in scratch.iter_mut() {
+        let e = F::sample_exp1(rng);
+        *slot = e;
+        let y = e - g_c;
+        let t = g + y;
+        g_c = (t - g) - y;
+        g = t;
+    }
+    let e_extra = F::sample_exp1(rng);
+    let y = e_extra - g_c;
+    g = g + y; // last add; compensation no longer needed
+
+    // Phase 2: walk scratch left-to-right. cumulative_e accumulates
+    // S_i = E_1 + … + E_i (also Kahan); u_i = S_i / G is the i-th
+    // sorted uniform. Merge against weights with the safeguard
+    // `target.min(total)`; see the doc comment above.
+    let inv_g = F::one() / g;
+    let mut cumulative_e = F::zero();
+    let mut ce_c = F::zero();
+    let mut j: usize = 0;
+    let mut cumulative_w = weights[0];
+
+    for (slot_in, slot_out) in scratch.iter().zip(out.iter_mut()) {
+        let y = *slot_in - ce_c;
+        let t = cumulative_e + y;
+        ce_c = (t - cumulative_e) - y;
+        cumulative_e = t;
+
+        let u = cumulative_e * inv_g;
+        let target = (total * u).min(total);
+        while target > cumulative_w {
+            j += 1;
+            cumulative_w = cumulative_w + weights[j];
+        }
+        *slot_out = j;
     }
 }
