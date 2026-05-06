@@ -21,9 +21,9 @@ use beta_k1::{
     verify_acceptance_bound, BetaFloat, SortedUniforms,
 };
 use num_traits::Float;
+use rand::rngs::StdRng;
 use rand::Rng;
 use rand::SeedableRng;
-use rand::rngs::StdRng;
 use std::hint::black_box;
 use std::time::Instant;
 
@@ -83,7 +83,11 @@ fn main() {
 
     println!(
         "\n=== Result: {} ===",
-        if all_passed { "ALL TESTS PASSED" } else { "FAILURES" }
+        if all_passed {
+            "ALL TESTS PASSED"
+        } else {
+            "FAILURES"
+        }
     );
     if !all_passed {
         std::process::exit(1);
@@ -119,7 +123,10 @@ fn test_acceptance_bound() -> bool {
 
 /// Test 2: All samples are in [0, 1] for both implementations.
 fn test_range<F: BetaFloat>(label: &str) -> bool {
-    println!("[Test 2] Samples are within [0, 1] (both implementations) [{}]", label);
+    println!(
+        "[Test 2] Samples are within [0, 1] (both implementations) [{}]",
+        label
+    );
     let mut rng = StdRng::seed_from_u64(0xC0FFEE);
     let mut all_ok = true;
     let zero = F::zero();
@@ -148,7 +155,7 @@ fn test_range<F: BetaFloat>(label: &str) -> bool {
 
 /// Test 3: Empirical moments match closed-form Beta(k, 1) values.
 ///
-/// For X ~ Beta(k, 1):  E[X] = k/(k+1),  Var[X] = k / [(k+1)^2 (k+2)].
+/// For X ~ Beta(k, 1):  `E[X] = k/(k+1)`,  `Var[X] = k / [(k+1)^2 (k+2)]`.
 fn test_moments<F: BetaFloat>(label: &str) -> bool {
     println!(
         "[Test 3] Empirical moments match Beta(k, 1) closed form (rejection impl) [{}]",
@@ -202,7 +209,10 @@ fn test_moments<F: BetaFloat>(label: &str) -> bool {
 
 /// Test 4: KS test of the rejection sampler against the analytic CDF F_k(x) = x^k.
 fn test_ks_against_theory<F: BetaFloat>(label: &str) -> bool {
-    println!("[Test 4] KS test of rejection sampler vs. F_k(x) = x^k [{}]", label);
+    println!(
+        "[Test 4] KS test of rejection sampler vs. F_k(x) = x^k [{}]",
+        label
+    );
     let mut rng = StdRng::seed_from_u64(0x12345678);
     let mut all_ok = true;
     let n = 50_000;
@@ -504,7 +514,10 @@ fn test_resample_vs_multinomial<F: BetaFloat>(label: &str) -> bool {
     let test_cases: Vec<(&str, Vec<f64>)> = vec![
         ("uniform-10", vec![1.0; 10]),
         ("skewed-8", (1..=8).map(|x| x as f64).collect()),
-        ("peaky-15", (0..15).map(|i| if i == 7 { 30.0 } else { 1.0 }).collect()),
+        (
+            "peaky-15",
+            (0..15).map(|i| if i == 7 { 30.0 } else { 1.0 }).collect(),
+        ),
     ];
 
     for (name, weights_f64) in &test_cases {
@@ -612,7 +625,9 @@ fn bench_typed<F: BetaFloat>(label: &str) {
 
     for &k in &[2u32, 5, 10, 50, 200, 1000] {
         let pow_ns = bench_one(black_box(k), n, |rng, kk| beta_k_1_pow::<F, _>(rng, kk));
-        let rej_ns = bench_one(black_box(k), n, |rng, kk| beta_k_1_rejection::<F, _>(rng, kk));
+        let rej_ns = bench_one(black_box(k), n, |rng, kk| {
+            beta_k_1_rejection::<F, _>(rng, kk)
+        });
         println!(
             "  [{}]  {:5}  {:16.2}  {:16.2}  {:9.2}x",
             label,
@@ -644,15 +659,16 @@ fn bench_resample_typed<F: BetaFloat>(label: &str) {
         let n_runs = ((30_000_000 / (m + n)).max(3)) as u64;
         let t0 = Instant::now();
         for _ in 0..n_runs {
-            resample_indices::<F, _>(black_box(&mut rng), black_box(&weights), black_box(&mut out));
+            resample_indices::<F, _>(
+                black_box(&mut rng),
+                black_box(&weights),
+                black_box(&mut out),
+            );
         }
         let elapsed = t0.elapsed();
         let ns_per_call = elapsed.as_nanos() as f64 / n_runs as f64;
         let ns_per_step = ns_per_call / (m + n) as f64;
-        println!(
-            "  {:>8}  {:>14.0}  {:>14.2}",
-            m, ns_per_call, ns_per_step
-        );
+        println!("  {:>8}  {:>14.0}  {:>14.2}", m, ns_per_call, ns_per_step);
     }
 }
 

@@ -22,6 +22,22 @@
 //! FPU (e.g. Cortex-M4F); the `f64` path is the default for desktop and
 //! for any case where 10⁶-particle precision matters.
 //!
+//! ## `no_std` support
+//!
+//! The library compiles in `no_std` mode. The crate has two mutually
+//! exclusive math-source features:
+//!
+//! - `std` (default): use the standard library's libm bindings.
+//! - `libm`: use the [`libm`] crate via [`num_traits`] for `ln` and
+//!   `powf`. Suitable for bare-metal targets.
+//!
+//! Enable exactly one. The library performs no allocation: it operates
+//! over caller-supplied slices (`&[F]` for weights, `&mut [usize]` for
+//! resample output) and never calls into `alloc`.
+//!
+//! [`libm`]: https://crates.io/crates/libm
+//! [`num_traits`]: https://crates.io/crates/num-traits
+//!
 //! ## Float type tradeoffs
 //!
 //! The choice between `f32` and `f64` has both performance and accuracy
@@ -82,6 +98,14 @@
 //! - **Rejection backend** is unaffected by the zero edge case: its
 //!   output is `1 − y/k` for `y < k`, strictly less than 1 by
 //!   construction, with no zero on the other end.
+
+#![cfg_attr(not(feature = "std"), no_std)]
+
+#[cfg(not(any(feature = "std", feature = "libm")))]
+compile_error!(
+    "Enable exactly one of the `std` or `libm` features so transcendental \
+     math (`ln`, `powf`) is available."
+);
 
 use num_traits::Float;
 use rand::Rng;
@@ -402,7 +426,10 @@ pub fn resample_indices<F: BetaFloat, R: Rng + ?Sized>(
     // load-bearing for the boundary argument — see module docs above.
     let mut total = F::zero();
     for &w in weights {
-        debug_assert!(w.is_finite() && w >= F::zero(), "weight must be finite and ≥ 0");
+        debug_assert!(
+            w.is_finite() && w >= F::zero(),
+            "weight must be finite and ≥ 0"
+        );
         total = total + w;
     }
     debug_assert!(total > F::zero(), "total weight must be strictly positive");
