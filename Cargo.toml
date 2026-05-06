@@ -14,6 +14,7 @@ rejection = []
 [dependencies]
 rand = "0.8"
 rand_distr = "0.4"
+num-traits = "0.2"
 
 [[bin]]
 name = "test_driver"

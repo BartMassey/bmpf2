@@ -15,9 +15,118 @@
 //! and `beta_k_1_rejection`, regardless of feature flags, so they can
 //! be compared and tested together. The top-level `beta_k_1` symbol
 //! dispatches to whichever one the active feature selects.
+//!
+//! All public APIs are generic over the float type via the [`BetaFloat`]
+//! trait, which is implemented for `f32` and `f64`. The `f32` path is
+//! intended for memory-constrained MCU targets with a single-precision
+//! FPU (e.g. Cortex-M4F); the `f64` path is the default for desktop and
+//! for any case where 10⁶-particle precision matters.
+//!
+//! ## Float type tradeoffs
+//!
+//! The choice between `f32` and `f64` has both performance and accuracy
+//! consequences. Pick based on the largest `n` you expect to resample.
+//!
+//! ### `f64` — ~15–16 decimal digits
+//!
+//! The default. The sum accumulators inside [`resample_indices`] (the
+//! `total = Σ weights` walk and the matching `cumulative` walk in the
+//! merge) accrue relative error of order `n · 2⁻⁵²`, which is below
+//! `10⁻⁹` even at `n = 10⁶`. Use `f64` whenever sample-count error
+//! matters or when you have no reason not to.
+//!
+//! ### `f32` — ~7 decimal digits
+//!
+//! Faster and half the memory on hardware with a single-precision FPU.
+//! Suitable for typical embedded particle filters (10²–10⁴ particles).
+//! The relevant precision bounds:
+//!
+//! - **Per-sample precision** is limited by the 24-bit mantissa: each
+//!   `Beta(k, 1)` draw is accurate to `~6·10⁻⁸` in absolute terms, with
+//!   the usual caveat that values close to 1 lose representable
+//!   resolution in their distance from 1. For the sorted-uniforms
+//!   recurrence in [`SortedUniforms`] this is generally fine; later
+//!   spacings are pre-multiplied by `(1 − last)` and shrink with
+//!   `last → 1`, so the absolute step size matches the local
+//!   resolution.
+//!
+//! - **`resample_indices` accumulator error** scales as
+//!   `O(n · 2⁻²⁴)` because the implementation uses a naive running
+//!   sum (no Kahan compensation) for both `total` and the merge's
+//!   `cumulative`. Concretely, the relative error in the cumulative
+//!   prefix sum is approximately:
+//!
+//!   | `n`     | rel. error      |
+//!   |---------|-----------------|
+//!   | 10²     | ~6·10⁻⁶         |
+//!   | 10³     | ~6·10⁻⁵         |
+//!   | 10⁴     | ~6·10⁻⁴         |
+//!   | 10⁵     | ~6·10⁻³         |
+//!   | 10⁶     | ~6·10⁻² (unusable) |
+//!
+//!   Recommended: `f32` for `n ≤ 2¹⁶ ≈ 65 000`, `f64` beyond.
+//!   The boundary is where per-sample selection bias from cumulative
+//!   rounding becomes comparable to the natural Monte-Carlo standard
+//!   error (`~1/√n`). For applications more sensitive to tail
+//!   probabilities (rare events, high-weight peaks), tighten the
+//!   bound by an order of magnitude.
+//!
+//! - **`pow`-backend zero edge case**: `f32` produces exactly
+//!   `u = 0` from the underlying RNG with probability `~2⁻²³` per
+//!   call, vs. `~2⁻⁵²` for `f64`. Either of these would yield
+//!   `0^(1/k) = 0` and bias [`SortedUniforms`] (where `spacing = 1`
+//!   would push `last` to its current value of `1` exactly). The
+//!   library guards against this internally by redrawing on
+//!   `u == 0` inside [`beta_k_1_pow`]; no caller action required.
+//!
+//! - **Rejection backend** is unaffected by the zero edge case: its
+//!   output is `1 − y/k` for `y < k`, strictly less than 1 by
+//!   construction, with no zero on the other end.
 
+use num_traits::Float;
 use rand::Rng;
 use rand_distr::{Distribution, Exp1};
+
+// ---------------------------------------------------------------------------
+// Float abstraction.
+// ---------------------------------------------------------------------------
+
+/// Floats supported by the sampler. Combines `num_traits::Float` (for the
+/// arithmetic and transcendental ops) with the per-type RNG sampling
+/// primitives we need.
+///
+/// Implemented for `f32` and `f64`. The `Exp(1)` and `Uniform(0, 1)`
+/// distributions in `rand_distr` are not generic over the float type —
+/// each type has its own `Distribution` impl using a per-type Ziggurat —
+/// so we wrap those calls behind associated functions here.
+pub trait BetaFloat: Float {
+    /// Draw a single Exp(1) variate using `rand_distr`'s per-type Ziggurat.
+    fn sample_exp1<R: Rng + ?Sized>(rng: &mut R) -> Self;
+    /// Draw a single Uniform(0, 1) variate.
+    fn sample_uniform<R: Rng + ?Sized>(rng: &mut R) -> Self;
+}
+
+impl BetaFloat for f32 {
+    #[inline]
+    fn sample_exp1<R: Rng + ?Sized>(rng: &mut R) -> Self {
+        Exp1.sample(rng)
+    }
+    #[inline]
+    fn sample_uniform<R: Rng + ?Sized>(rng: &mut R) -> Self {
+        rng.gen()
+    }
+}
+
+impl BetaFloat for f64 {
+    #[inline]
+    fn sample_exp1<R: Rng + ?Sized>(rng: &mut R) -> Self {
+        Exp1.sample(rng)
+    }
+    #[inline]
+    fn sample_uniform<R: Rng + ?Sized>(rng: &mut R) -> Self {
+        rng.gen()
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Top-level dispatch: chooses an implementation based on active features.
@@ -33,13 +142,13 @@ use rand_distr::{Distribution, Exp1};
 /// Panics if `k == 0`.
 #[cfg(feature = "pow")]
 #[inline]
-pub fn beta_k_1<R: Rng + ?Sized>(rng: &mut R, k: u32) -> f64 {
+pub fn beta_k_1<F: BetaFloat, R: Rng + ?Sized>(rng: &mut R, k: u32) -> F {
     beta_k_1_pow(rng, k)
 }
 
 #[cfg(all(feature = "rejection", not(feature = "pow")))]
 #[inline]
-pub fn beta_k_1<R: Rng + ?Sized>(rng: &mut R, k: u32) -> f64 {
+pub fn beta_k_1<F: BetaFloat, R: Rng + ?Sized>(rng: &mut R, k: u32) -> F {
     beta_k_1_rejection(rng, k)
 }
 
@@ -55,15 +164,25 @@ compile_error!("At least one of the `pow` or `rejection` features must be enable
 /// Always available, regardless of feature flags, so it can serve as the
 /// reference oracle in tests.
 ///
+/// To eliminate the (rare) edge case where `U` is sampled as exactly 0 —
+/// which would yield `0^(1/k) = 0` and bias downstream sorted-uniforms
+/// generation — this function redraws if `U == 0`. The probability of a
+/// redraw is ~2⁻²³ for `f32` and ~2⁻⁵² for `f64` per call.
+///
 /// # Panics
 /// Panics if `k == 0`.
-pub fn beta_k_1_pow<R: Rng + ?Sized>(rng: &mut R, k: u32) -> f64 {
+pub fn beta_k_1_pow<F: BetaFloat, R: Rng + ?Sized>(rng: &mut R, k: u32) -> F {
     assert!(k >= 1, "k must be at least 1");
-    let u: f64 = rng.gen();
+    let u: F = loop {
+        let candidate = F::sample_uniform(rng);
+        if candidate != F::zero() {
+            break candidate;
+        }
+    };
     if k == 1 {
         u
     } else {
-        u.powf(1.0 / k as f64)
+        u.powf(F::one() / F::from(k).unwrap())
     }
 }
 
@@ -86,34 +205,35 @@ pub fn beta_k_1_pow<R: Rng + ?Sized>(rng: &mut R, k: u32) -> f64 {
 ///
 /// # Panics
 /// Panics if `k == 0`.
-pub fn beta_k_1_rejection<R: Rng + ?Sized>(rng: &mut R, k: u32) -> f64 {
+pub fn beta_k_1_rejection<F: BetaFloat, R: Rng + ?Sized>(rng: &mut R, k: u32) -> F {
     assert!(k >= 1, "k must be at least 1");
 
     if k == 1 {
-        return rng.gen::<f64>();
+        return F::sample_uniform(rng);
     }
 
-    let kf = k as f64;
-    let km1 = (k - 1) as f64;
+    let one = F::one();
+    let kf = F::from(k).unwrap();
+    let km1 = F::from(k - 1).unwrap();
 
     // log M_k = (k-1)·log(1 - 1/k) + 1, the log of the supremum of the
     // un-normalized acceptance ratio (1 - y/k)^(k-1)·e^y over y ∈ [0,k].
     // Computed once per call. Numerically: M_k → e^(1/k) as k → ∞, so
     // log_m_k → 1/k for large k.
-    let log_m_k = km1 * (1.0 - 1.0 / kf).ln() + 1.0;
+    let log_m_k = km1 * (one - one / kf).ln() + one;
 
     loop {
-        let y: f64 = Exp1.sample(rng);
+        let y: F = F::sample_exp1(rng);
         if y >= kf {
             // Outside target support; reject and redraw. Probability ≈ e^(-k).
             continue;
         }
 
-        let v: f64 = rng.gen();
+        let v: F = F::sample_uniform(rng);
         // log A_k(y) = (k-1)·log(1 - y/k) + y - log M_k, ≤ 0 by construction.
-        let log_accept = km1 * (1.0 - y / kf).ln() + y - log_m_k;
+        let log_accept = km1 * (one - y / kf).ln() + y - log_m_k;
         if v.ln() < log_accept {
-            return 1.0 - y / kf;
+            return one - y / kf;
         }
     }
 }
@@ -124,10 +244,10 @@ pub fn beta_k_1_rejection<R: Rng + ?Sized>(rng: &mut R, k: u32) -> f64 {
 
 /// Independent oracle: draw k uniforms and return their max.
 /// Useful as a non-`pow`, non-rejection reference distribution in tests.
-pub fn beta_k_1_max_of_uniforms<R: Rng + ?Sized>(rng: &mut R, k: u32) -> f64 {
-    let mut m = 0.0_f64;
+pub fn beta_k_1_max_of_uniforms<F: BetaFloat, R: Rng + ?Sized>(rng: &mut R, k: u32) -> F {
+    let mut m = F::zero();
     for _ in 0..k {
-        let u: f64 = rng.gen();
+        let u: F = F::sample_uniform(rng);
         if u > m {
             m = u;
         }
@@ -139,18 +259,20 @@ pub fn beta_k_1_max_of_uniforms<R: Rng + ?Sized>(rng: &mut R, k: u32) -> f64 {
 /// is correct: the acceptance probability A_k(Y) must satisfy
 /// log A_k(Y) ≤ 0 for all Y ∈ [0, k). Returns the maximum of log A_k(Y)
 /// observed on a fine grid; should be ≤ 0 (modulo floating-point error).
-pub fn verify_acceptance_bound(k: u32, n_grid: usize) -> f64 {
+pub fn verify_acceptance_bound<F: Float>(k: u32, n_grid: usize) -> F {
     if k == 1 {
-        return 0.0;
+        return F::zero();
     }
-    let kf = k as f64;
-    let km1 = (k - 1) as f64;
-    let log_m_k = km1 * (1.0 - 1.0 / kf).ln() + 1.0;
+    let one = F::one();
+    let kf = F::from(k).unwrap();
+    let km1 = F::from(k - 1).unwrap();
+    let n_grid_f = F::from(n_grid).unwrap();
+    let log_m_k = km1 * (one - one / kf).ln() + one;
 
-    let mut max_log_accept: f64 = f64::NEG_INFINITY;
+    let mut max_log_accept: F = F::neg_infinity();
     for i in 1..n_grid {
-        let y = kf * (i as f64) / (n_grid as f64);
-        let log_accept = km1 * (1.0 - y / kf).ln() + y - log_m_k;
+        let y = kf * F::from(i).unwrap() / n_grid_f;
+        let log_accept = km1 * (one - y / kf).ln() + y - log_m_k;
         if log_accept > max_log_accept {
             max_log_accept = log_accept;
         }
@@ -198,28 +320,28 @@ pub fn verify_acceptance_bound(k: u32, n_grid: usize) -> f64 {
 ///
 /// Holds a mutable reference to the RNG. Yields exactly `n` values, then
 /// `None` thereafter.
-pub struct SortedUniforms<'a, R: Rng + ?Sized> {
+pub struct SortedUniforms<'a, F: BetaFloat, R: Rng + ?Sized> {
     rng: &'a mut R,
     remaining: u32,
-    last: f64,
+    last: F,
 }
 
-impl<'a, R: Rng + ?Sized> SortedUniforms<'a, R> {
+impl<'a, F: BetaFloat, R: Rng + ?Sized> SortedUniforms<'a, F, R> {
     /// Create an iterator that will yield `n` sorted uniform variates.
     pub fn new(rng: &'a mut R, n: u32) -> Self {
         Self {
             rng,
             remaining: n,
-            last: 0.0,
+            last: F::zero(),
         }
     }
 }
 
-impl<'a, R: Rng + ?Sized> Iterator for SortedUniforms<'a, R> {
-    type Item = f64;
+impl<'a, F: BetaFloat, R: Rng + ?Sized> Iterator for SortedUniforms<'a, F, R> {
+    type Item = F;
 
     #[inline]
-    fn next(&mut self) -> Option<f64> {
+    fn next(&mut self) -> Option<F> {
         if self.remaining == 0 {
             return None;
         }
@@ -227,8 +349,8 @@ impl<'a, R: Rng + ?Sized> Iterator for SortedUniforms<'a, R> {
         // the next sorted variate sits into the remaining range. Computed
         // here as `1 - Beta(k, 1)`. The cancellation loses a few low-order
         // bits, but downstream uses are insensitive at that level.
-        let spacing = 1.0 - beta_k_1(self.rng, self.remaining);
-        self.last += (1.0 - self.last) * spacing;
+        let spacing = F::one() - beta_k_1::<F, _>(self.rng, self.remaining);
+        self.last = self.last + (F::one() - self.last) * spacing;
         self.remaining -= 1;
         Some(self.last)
     }
@@ -254,10 +376,21 @@ impl<'a, R: Rng + ?Sized> Iterator for SortedUniforms<'a, R> {
 /// Violating any of these will panic in debug builds and produce undefined
 /// (but memory-safe) output in release.
 ///
+/// # Precision
+/// With `F = f32`, the prefix-sum accumulator accrues relative error of
+/// order `n · 2⁻²⁴` (≈ `6·10⁻⁵` at `n = 10³`, ≈ `6·10⁻³` at `n = 10⁵`).
+/// Recommended `n ≤ 2¹⁶` for `f32`; use `f64` beyond. With `F = f64`
+/// the same bound is `n · 2⁻⁵²`, negligible for any realistic `n`.
+/// See the crate-level "Float type tradeoffs" section.
+///
 /// # Panics
 /// Panics in debug if preconditions are violated. Always panics if
 /// `weights.is_empty()`.
-pub fn resample_indices<R: Rng + ?Sized>(rng: &mut R, weights: &[f64], out: &mut [usize]) {
+pub fn resample_indices<F: BetaFloat, R: Rng + ?Sized>(
+    rng: &mut R,
+    weights: &[F],
+    out: &mut [usize],
+) {
     assert!(!weights.is_empty(), "weights must be nonempty");
 
     if out.is_empty() {
@@ -267,15 +400,15 @@ pub fn resample_indices<R: Rng + ?Sized>(rng: &mut R, weights: &[f64], out: &mut
     // Total weight, computed by walking `weights` in the same order the
     // merge will accumulate `cumulative`. This bit-for-bit equality is
     // load-bearing for the boundary argument — see module docs above.
-    let mut total = 0.0_f64;
+    let mut total = F::zero();
     for &w in weights {
-        debug_assert!(w.is_finite() && w >= 0.0, "weight must be finite and ≥ 0");
-        total += w;
+        debug_assert!(w.is_finite() && w >= F::zero(), "weight must be finite and ≥ 0");
+        total = total + w;
     }
-    debug_assert!(total > 0.0, "total weight must be strictly positive");
+    debug_assert!(total > F::zero(), "total weight must be strictly positive");
 
     let n = out.len() as u32;
-    let mut sorted = SortedUniforms::new(rng, n);
+    let mut sorted = SortedUniforms::<F, R>::new(rng, n);
 
     // Streaming merge. `j` advances monotonically through `weights`;
     // `cumulative` is the running prefix sum w_0 + ... + w_j.
@@ -288,7 +421,7 @@ pub fn resample_indices<R: Rng + ?Sized>(rng: &mut R, weights: &[f64], out: &mut
         let target = total * u;
         while target > cumulative {
             j += 1;
-            cumulative += weights[j];
+            cumulative = cumulative + weights[j];
         }
         *slot = j;
     }
