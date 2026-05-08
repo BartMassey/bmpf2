@@ -2,102 +2,59 @@
 //! Uniform(0, 1) variates — for use in the linear-time perfect weighted
 //! resampling algorithm of Massey (ICASSP 2008).
 //!
+//! All public APIs are `f32`. The realistic deployment target is the
+//! Cortex-M4F (and similar single-precision FPUs), so the library
+//! commits to single precision throughout. Where the obvious f32
+//! algorithm would lose too much precision (the prefix-sum walks in
+//! [`resample_indices`] and [`resample_indices_buffered`]), the
+//! library uses Kahan compensated summation to recover O(ε) error
+//! while staying entirely on the f32 FPU.
+//!
 //! Two implementations are provided. The default (`pow` feature) computes
 //! `u.powf(1.0 / k)` directly. The alternative (`rejection` feature) uses
 //! Exp(1)-proposed rejection sampling with a log-space acceptance test;
 //! it is provided for hardware where the libm `pow` is significantly
-//! slower than `log` plus an Exp(1) Ziggurat draw. On modern desktop
-//! hardware the `pow` path is roughly 10× faster; on embedded targets
-//! the gap narrows and may invert. Profile on the real target before
-//! choosing.
+//! slower than `log` plus an Exp(1) Ziggurat draw. With per-call
+//! `black_box` fences the `pow` path is roughly 2–3× faster on modern
+//! x86; without fences SIMD vectorization can widen this to ~10×. On
+//! embedded targets the gap narrows and may invert. Profile on the
+//! real target before choosing.
 //!
 //! Both implementations are exposed unconditionally as `beta_k_1_pow`
 //! and `beta_k_1_rejection`, regardless of feature flags, so they can
 //! be compared and tested together. The top-level `beta_k_1` symbol
 //! dispatches to whichever one the active feature selects.
 //!
-//! All public APIs are generic over the float type via the [`BetaFloat`]
-//! trait, which is implemented for `f32` and `f64`. The `f32` path is
-//! intended for memory-constrained MCU targets with a single-precision
-//! FPU (e.g. Cortex-M4F); the `f64` path is the default for desktop and
-//! for any case where 10⁶-particle precision matters.
-//!
 //! ## `no_std` support
 //!
 //! The library compiles in `no_std` mode. The crate has two mutually
 //! exclusive math-source features:
 //!
-//! - `std` (default): use the standard library's libm bindings.
+//! - `std` (default): use the standard library's libm bindings via
+//!   the inherent `f32::ln` / `f32::powf` methods.
 //! - `libm`: use the [`libm`] crate via [`num_traits`] for `ln` and
 //!   `powf`. Suitable for bare-metal targets.
 //!
 //! Enable exactly one. The library performs no allocation: it operates
-//! over caller-supplied slices (`&[F]` for weights, `&mut [usize]` for
-//! resample output) and never calls into `alloc`.
+//! over caller-supplied slices (`&[f32]` for weights, `&mut [usize]`
+//! for resample output, `&mut [f32]` for scratch) and never calls into
+//! `alloc`.
 //!
 //! [`libm`]: https://crates.io/crates/libm
 //! [`num_traits`]: https://crates.io/crates/num-traits
 //!
-//! ## Float type tradeoffs
+//! ## Precision
 //!
-//! The choice between `f32` and `f64` has both performance and accuracy
-//! consequences. Pick based on the largest `n` you expect to resample.
-//!
-//! ### `f64` — ~15–16 decimal digits
-//!
-//! The default. The sum accumulators inside [`resample_indices`] (the
-//! `total = Σ weights` walk and the matching `cumulative` walk in the
-//! merge) accrue relative error of order `n · 2⁻⁵²`, which is below
-//! `10⁻⁹` even at `n = 10⁶`. Use `f64` whenever sample-count error
-//! matters or when you have no reason not to.
-//!
-//! ### `f32` — ~7 decimal digits
-//!
-//! Faster and half the memory on hardware with a single-precision FPU.
-//! Suitable for typical embedded particle filters (10²–10⁴ particles).
-//! The relevant precision bounds:
-//!
-//! - **Per-sample precision** is limited by the 24-bit mantissa: each
-//!   `Beta(k, 1)` draw is accurate to `~6·10⁻⁸` in absolute terms, with
-//!   the usual caveat that values close to 1 lose representable
-//!   resolution in their distance from 1. For the sorted-uniforms
-//!   recurrence in [`SortedUniforms`] this is generally fine; later
-//!   spacings are pre-multiplied by `(1 − last)` and shrink with
-//!   `last → 1`, so the absolute step size matches the local
-//!   resolution.
-//!
-//! - **`resample_indices` accumulator error** scales as
-//!   `O(n · 2⁻²⁴)` because the implementation uses a naive running
-//!   sum (no Kahan compensation) for both `total` and the merge's
-//!   `cumulative`. Concretely, the relative error in the cumulative
-//!   prefix sum is approximately:
-//!
-//!   | `n`     | rel. error      |
-//!   |---------|-----------------|
-//!   | 10²     | ~6·10⁻⁶         |
-//!   | 10³     | ~6·10⁻⁵         |
-//!   | 10⁴     | ~6·10⁻⁴         |
-//!   | 10⁵     | ~6·10⁻³         |
-//!   | 10⁶     | ~6·10⁻² (unusable) |
-//!
-//!   Recommended: `f32` for `n ≤ 2¹⁶ ≈ 65 000`, `f64` beyond.
-//!   The boundary is where per-sample selection bias from cumulative
-//!   rounding becomes comparable to the natural Monte-Carlo standard
-//!   error (`~1/√n`). For applications more sensitive to tail
-//!   probabilities (rare events, high-weight peaks), tighten the
-//!   bound by an order of magnitude.
-//!
-//! - **`pow`-backend zero edge case**: `f32` produces exactly
-//!   `u = 0` from the underlying RNG with probability `~2⁻²³` per
-//!   call, vs. `~2⁻⁵²` for `f64`. Either of these would yield
-//!   `0^(1/k) = 0` and bias [`SortedUniforms`] (where `spacing = 1`
-//!   would push `last` to its current value of `1` exactly). The
-//!   library guards against this internally by redrawing on
-//!   `u == 0` inside [`beta_k_1_pow`]; no caller action required.
-//!
-//! - **Rejection backend** is unaffected by the zero edge case: its
-//!   output is `1 − y/k` for `y < k`, strictly less than 1 by
-//!   construction, with no zero on the other end.
+//! Per-sample precision is limited by the 24-bit mantissa: each
+//! `Beta(k, 1)` draw is accurate to `~6·10⁻⁸` in absolute terms. The
+//! prefix-sum walks in [`resample_indices`] and
+//! [`resample_indices_buffered`] would naively accrue `O(n · 2⁻²⁴)`
+//! relative error, which becomes unusable around n ≈ 10⁵; both walks
+//! therefore use Kahan compensated summation, reducing the bound to
+//! `O(2⁻²⁴ · max|w|)`, effectively constant. The `pow` backend
+//! produces exactly `u = 0` from the underlying RNG with probability
+//! `~2⁻²³` per call; this is guarded by an internal redraw in
+//! [`beta_k_1_pow`].
 
 #![cfg_attr(not(feature = "std"), no_std)]
 
@@ -107,50 +64,15 @@ compile_error!(
      math (`ln`, `powf`) is available."
 );
 
+// In no_std mode, `f32::ln` / `f32::powf` are not inherent methods; we
+// reach them through the `num_traits::Float` trait, which under the
+// `libm` feature dispatches to the `libm` crate. In std mode the
+// inherent methods are used directly.
+#[cfg(not(feature = "std"))]
 use num_traits::Float;
+
 use rand::Rng;
 use rand_distr::{Distribution, Exp1};
-
-// ---------------------------------------------------------------------------
-// Float abstraction.
-// ---------------------------------------------------------------------------
-
-/// Floats supported by the sampler. Combines `num_traits::Float` (for the
-/// arithmetic and transcendental ops) with the per-type RNG sampling
-/// primitives we need.
-///
-/// Implemented for `f32` and `f64`. The `Exp(1)` and `Uniform(0, 1)`
-/// distributions in `rand_distr` are not generic over the float type —
-/// each type has its own `Distribution` impl using a per-type Ziggurat —
-/// so we wrap those calls behind associated functions here.
-pub trait BetaFloat: Float {
-    /// Draw a single Exp(1) variate using `rand_distr`'s per-type Ziggurat.
-    fn sample_exp1<R: Rng + ?Sized>(rng: &mut R) -> Self;
-    /// Draw a single Uniform(0, 1) variate.
-    fn sample_uniform<R: Rng + ?Sized>(rng: &mut R) -> Self;
-}
-
-impl BetaFloat for f32 {
-    #[inline]
-    fn sample_exp1<R: Rng + ?Sized>(rng: &mut R) -> Self {
-        Exp1.sample(rng)
-    }
-    #[inline]
-    fn sample_uniform<R: Rng + ?Sized>(rng: &mut R) -> Self {
-        rng.gen()
-    }
-}
-
-impl BetaFloat for f64 {
-    #[inline]
-    fn sample_exp1<R: Rng + ?Sized>(rng: &mut R) -> Self {
-        Exp1.sample(rng)
-    }
-    #[inline]
-    fn sample_uniform<R: Rng + ?Sized>(rng: &mut R) -> Self {
-        rng.gen()
-    }
-}
 
 // ---------------------------------------------------------------------------
 // Top-level dispatch: chooses an implementation based on active features.
@@ -166,13 +88,13 @@ impl BetaFloat for f64 {
 /// Panics if `k == 0`.
 #[cfg(feature = "pow")]
 #[inline]
-pub fn beta_k_1<F: BetaFloat, R: Rng + ?Sized>(rng: &mut R, k: u32) -> F {
+pub fn beta_k_1<R: Rng + ?Sized>(rng: &mut R, k: u32) -> f32 {
     beta_k_1_pow(rng, k)
 }
 
 #[cfg(all(feature = "rejection", not(feature = "pow")))]
 #[inline]
-pub fn beta_k_1<F: BetaFloat, R: Rng + ?Sized>(rng: &mut R, k: u32) -> F {
+pub fn beta_k_1<R: Rng + ?Sized>(rng: &mut R, k: u32) -> f32 {
     beta_k_1_rejection(rng, k)
 }
 
@@ -191,22 +113,22 @@ compile_error!("At least one of the `pow` or `rejection` features must be enable
 /// To eliminate the (rare) edge case where `U` is sampled as exactly 0 —
 /// which would yield `0^(1/k) = 0` and bias downstream sorted-uniforms
 /// generation — this function redraws if `U == 0`. The probability of a
-/// redraw is ~2⁻²³ for `f32` and ~2⁻⁵² for `f64` per call.
+/// redraw is `~2⁻²³` per call.
 ///
 /// # Panics
 /// Panics if `k == 0`.
-pub fn beta_k_1_pow<F: BetaFloat, R: Rng + ?Sized>(rng: &mut R, k: u32) -> F {
+pub fn beta_k_1_pow<R: Rng + ?Sized>(rng: &mut R, k: u32) -> f32 {
     assert!(k >= 1, "k must be at least 1");
-    let u: F = loop {
-        let candidate = F::sample_uniform(rng);
-        if candidate != F::zero() {
+    let u: f32 = loop {
+        let candidate: f32 = rng.gen();
+        if candidate != 0.0 {
             break candidate;
         }
     };
     if k == 1 {
         u
     } else {
-        u.powf(F::one() / F::from(k).unwrap())
+        u.powf(1.0 / k as f32)
     }
 }
 
@@ -229,35 +151,34 @@ pub fn beta_k_1_pow<F: BetaFloat, R: Rng + ?Sized>(rng: &mut R, k: u32) -> F {
 ///
 /// # Panics
 /// Panics if `k == 0`.
-pub fn beta_k_1_rejection<F: BetaFloat, R: Rng + ?Sized>(rng: &mut R, k: u32) -> F {
+pub fn beta_k_1_rejection<R: Rng + ?Sized>(rng: &mut R, k: u32) -> f32 {
     assert!(k >= 1, "k must be at least 1");
 
     if k == 1 {
-        return F::sample_uniform(rng);
+        return rng.gen();
     }
 
-    let one = F::one();
-    let kf = F::from(k).unwrap();
-    let km1 = F::from(k - 1).unwrap();
+    let kf = k as f32;
+    let km1 = (k - 1) as f32;
 
     // log M_k = (k-1)·log(1 - 1/k) + 1, the log of the supremum of the
     // un-normalized acceptance ratio (1 - y/k)^(k-1)·e^y over y ∈ [0,k].
     // Computed once per call. Numerically: M_k → e^(1/k) as k → ∞, so
     // log_m_k → 1/k for large k.
-    let log_m_k = km1 * (one - one / kf).ln() + one;
+    let log_m_k = km1 * (1.0 - 1.0 / kf).ln() + 1.0;
 
     loop {
-        let y: F = F::sample_exp1(rng);
+        let y: f32 = Exp1.sample(rng);
         if y >= kf {
             // Outside target support; reject and redraw. Probability ≈ e^(-k).
             continue;
         }
 
-        let v: F = F::sample_uniform(rng);
+        let v: f32 = rng.gen();
         // log A_k(y) = (k-1)·log(1 - y/k) + y - log M_k, ≤ 0 by construction.
-        let log_accept = km1 * (one - y / kf).ln() + y - log_m_k;
+        let log_accept = km1 * (1.0 - y / kf).ln() + y - log_m_k;
         if v.ln() < log_accept {
-            return one - y / kf;
+            return 1.0 - y / kf;
         }
     }
 }
@@ -268,10 +189,10 @@ pub fn beta_k_1_rejection<F: BetaFloat, R: Rng + ?Sized>(rng: &mut R, k: u32) ->
 
 /// Independent oracle: draw k uniforms and return their max.
 /// Useful as a non-`pow`, non-rejection reference distribution in tests.
-pub fn beta_k_1_max_of_uniforms<F: BetaFloat, R: Rng + ?Sized>(rng: &mut R, k: u32) -> F {
-    let mut m = F::zero();
+pub fn beta_k_1_max_of_uniforms<R: Rng + ?Sized>(rng: &mut R, k: u32) -> f32 {
+    let mut m = 0.0_f32;
     for _ in 0..k {
-        let u: F = F::sample_uniform(rng);
+        let u: f32 = rng.gen();
         if u > m {
             m = u;
         }
@@ -283,20 +204,24 @@ pub fn beta_k_1_max_of_uniforms<F: BetaFloat, R: Rng + ?Sized>(rng: &mut R, k: u
 /// is correct: the acceptance probability A_k(Y) must satisfy
 /// log A_k(Y) ≤ 0 for all Y ∈ [0, k). Returns the maximum of log A_k(Y)
 /// observed on a fine grid; should be ≤ 0 (modulo floating-point error).
-pub fn verify_acceptance_bound<F: Float>(k: u32, n_grid: usize) -> F {
+///
+/// Computed in `f64` because this is a sanity check on the *math*: the
+/// constant `M_k` is an analytic choice independent of the library's
+/// f32 commitment, and we want a tight check, not a check sloppy
+/// enough to absorb f32 evaluation error.
+pub fn verify_acceptance_bound(k: u32, n_grid: usize) -> f64 {
     if k == 1 {
-        return F::zero();
+        return 0.0;
     }
-    let one = F::one();
-    let kf = F::from(k).unwrap();
-    let km1 = F::from(k - 1).unwrap();
-    let n_grid_f = F::from(n_grid).unwrap();
-    let log_m_k = km1 * (one - one / kf).ln() + one;
+    let kf = k as f64;
+    let km1 = (k - 1) as f64;
+    let n_grid_f = n_grid as f64;
+    let log_m_k = km1 * (1.0 - 1.0 / kf).ln() + 1.0;
 
-    let mut max_log_accept: F = F::neg_infinity();
+    let mut max_log_accept: f64 = f64::NEG_INFINITY;
     for i in 1..n_grid {
-        let y = kf * F::from(i).unwrap() / n_grid_f;
-        let log_accept = km1 * (one - y / kf).ln() + y - log_m_k;
+        let y = kf * (i as f64) / n_grid_f;
+        let log_accept = km1 * (1.0 - y / kf).ln() + y - log_m_k;
         if log_accept > max_log_accept {
             max_log_accept = log_accept;
         }
@@ -324,16 +249,23 @@ pub fn verify_acceptance_bound<F: Float>(k: u32, n_grid: usize) -> F {
 //   2. Merge the sorted variates against cumulative weights in a single
 //      pass, in O(m + n) time.
 //
-// Total: O(m + n), with the variate-generation phase being inherently
-// serial (loop-carried `last`) but the merge phase being a streaming scan
-// that the compiler can vectorize.
-//
-// Numerical robustness: the total weight is computed by walking `weights`
-// in index order with `total += w`, exactly matching the order in which
-// the merge accumulates `cumulative`. This guarantees that when the merge
-// reaches the last weight, `cumulative == total` bit-for-bit, so the
-// strict-less inequality `target = total · u_i < total = cumulative`
-// (which holds because `u_i < 1` strictly) prevents any walk past the end.
+// Numerical robustness: the total weight is Kahan-summed in index order,
+// and the merge's `cumulative` Kahan-sums weights in the same index order.
+// Kahan summation is deterministic in its input sequence and starting
+// state, so by the time the merge has consumed `weights[0..n]`,
+// `cumulative` equals `total` bit-for-bit. Combined with `target = total
+// · u_i < total = cumulative` (in exact arithmetic, since u_i < 1), this
+// prevents the merge from running off the end of the weights array. See
+// Lemma 3 in the README.
+
+/// Kahan compensated add: `*sum += x` with running compensator `*c`.
+#[inline(always)]
+fn kahan_add(sum: &mut f32, c: &mut f32, x: f32) {
+    let y = x - *c;
+    let t = *sum + y;
+    *c = (t - *sum) - y;
+    *sum = t;
+}
 
 /// Streaming iterator yielding `n` uniform variates in ascending order.
 ///
@@ -344,28 +276,28 @@ pub fn verify_acceptance_bound<F: Float>(k: u32, n_grid: usize) -> F {
 ///
 /// Holds a mutable reference to the RNG. Yields exactly `n` values, then
 /// `None` thereafter.
-pub struct SortedUniforms<'a, F: BetaFloat, R: Rng + ?Sized> {
+pub struct SortedUniforms<'a, R: Rng + ?Sized> {
     rng: &'a mut R,
     remaining: u32,
-    last: F,
+    last: f32,
 }
 
-impl<'a, F: BetaFloat, R: Rng + ?Sized> SortedUniforms<'a, F, R> {
+impl<'a, R: Rng + ?Sized> SortedUniforms<'a, R> {
     /// Create an iterator that will yield `n` sorted uniform variates.
     pub fn new(rng: &'a mut R, n: u32) -> Self {
         Self {
             rng,
             remaining: n,
-            last: F::zero(),
+            last: 0.0,
         }
     }
 }
 
-impl<'a, F: BetaFloat, R: Rng + ?Sized> Iterator for SortedUniforms<'a, F, R> {
-    type Item = F;
+impl<'a, R: Rng + ?Sized> Iterator for SortedUniforms<'a, R> {
+    type Item = f32;
 
     #[inline]
-    fn next(&mut self) -> Option<F> {
+    fn next(&mut self) -> Option<f32> {
         if self.remaining == 0 {
             return None;
         }
@@ -373,8 +305,8 @@ impl<'a, F: BetaFloat, R: Rng + ?Sized> Iterator for SortedUniforms<'a, F, R> {
         // the next sorted variate sits into the remaining range. Computed
         // here as `1 - Beta(k, 1)`. The cancellation loses a few low-order
         // bits, but downstream uses are insensitive at that level.
-        let spacing = F::one() - beta_k_1::<F, _>(self.rng, self.remaining);
-        self.last = self.last + (F::one() - self.last) * spacing;
+        let spacing = 1.0 - beta_k_1(self.rng, self.remaining);
+        self.last = self.last + (1.0 - self.last) * spacing;
         self.remaining -= 1;
         Some(self.last)
     }
@@ -400,13 +332,6 @@ impl<'a, F: BetaFloat, R: Rng + ?Sized> Iterator for SortedUniforms<'a, F, R> {
 /// Violating any of these will panic in debug builds and produce undefined
 /// (but memory-safe) output in release.
 ///
-/// # Precision
-/// With `F = f32`, the prefix-sum accumulator accrues relative error of
-/// order `n · 2⁻²⁴` (≈ `6·10⁻⁵` at `n = 10³`, ≈ `6·10⁻³` at `n = 10⁵`).
-/// Recommended `n ≤ 2¹⁶` for `f32`; use `f64` beyond. With `F = f64`
-/// the same bound is `n · 2⁻⁵²`, negligible for any realistic `n`.
-/// See the crate-level "Float type tradeoffs" section.
-///
 /// # See also
 /// [`resample_indices_buffered`] — same statistical contract, faster
 /// per element on hardware with a slow `pow`, but requires an extra
@@ -415,37 +340,38 @@ impl<'a, F: BetaFloat, R: Rng + ?Sized> Iterator for SortedUniforms<'a, F, R> {
 /// # Panics
 /// Panics in debug if preconditions are violated. Always panics if
 /// `weights.is_empty()`.
-pub fn resample_indices<F: BetaFloat, R: Rng + ?Sized>(
-    rng: &mut R,
-    weights: &[F],
-    out: &mut [usize],
-) {
+pub fn resample_indices<R: Rng + ?Sized>(rng: &mut R, weights: &[f32], out: &mut [usize]) {
     assert!(!weights.is_empty(), "weights must be nonempty");
 
     if out.is_empty() {
         return;
     }
 
-    // Total weight, computed by walking `weights` in the same order the
-    // merge will accumulate `cumulative`. This bit-for-bit equality is
-    // load-bearing for the boundary argument — see module docs above.
-    let mut total = F::zero();
+    // Total weight, Kahan-summed in index order. The merge below re-walks
+    // `weights` in the same index order with its own Kahan accumulator,
+    // so by the time it has consumed all weights its state matches `total`
+    // bit-for-bit. See module-level comment / Lemma 3 in the README.
+    let mut total = 0.0_f32;
+    let mut total_c = 0.0_f32;
     for &w in weights {
         debug_assert!(
-            w.is_finite() && w >= F::zero(),
+            w.is_finite() && w >= 0.0,
             "weight must be finite and ≥ 0"
         );
-        total = total + w;
+        kahan_add(&mut total, &mut total_c, w);
     }
-    debug_assert!(total > F::zero(), "total weight must be strictly positive");
+    debug_assert!(total > 0.0, "total weight must be strictly positive");
 
     let n = out.len() as u32;
-    let mut sorted = SortedUniforms::<F, R>::new(rng, n);
+    let mut sorted = SortedUniforms::new(rng, n);
 
     // Streaming merge. `j` advances monotonically through `weights`;
-    // `cumulative` is the running prefix sum w_0 + ... + w_j.
+    // `(cumulative, cumulative_c)` is the Kahan state for w_0 + ... + w_j.
+    // Initialized as if we'd just Kahan-added weights[0] to (0, 0): that
+    // step yields (weights[0], 0).
     let mut j: usize = 0;
     let mut cumulative = weights[0];
+    let mut cumulative_c = 0.0_f32;
 
     for slot in out.iter_mut() {
         // SortedUniforms always yields exactly `n` values.
@@ -453,7 +379,7 @@ pub fn resample_indices<F: BetaFloat, R: Rng + ?Sized>(
         let target = total * u;
         while target > cumulative {
             j += 1;
-            cumulative = cumulative + weights[j];
+            kahan_add(&mut cumulative, &mut cumulative_c, weights[j]);
         }
         *slot = j;
     }
@@ -481,29 +407,27 @@ pub fn resample_indices<F: BetaFloat, R: Rng + ?Sized>(
 ///   replaces this with an Exp(1) draw plus a multiplication by
 ///   `1/G` — typically several times faster, especially on hardware
 ///   without a fast vectorized `powf`.
-/// - **Needs scratch.** Caller supplies `&mut [F]` of length
-///   `out.len()`. On 32-bit MCU with `F = f32` and using a separate
-///   output buffer, this costs `4n` extra bytes.
+/// - **Needs scratch.** Caller supplies `&mut [f32]` of length
+///   `out.len()`. On 32-bit MCU this costs `4n` extra bytes.
 /// - **Same statistical contract.** Both methods produce indices
 ///   distributed as i.i.d. multinomial draws on `weights`, in
 ///   ascending order.
 ///
 /// # Numerical robustness
-/// Both `G` and the running prefix sum `cumulative_e` are accumulated
-/// using Kahan summation. Without compensation, the `f32` accumulator
-/// would accrue `O(n · 2⁻²⁴)` relative error — about 6% at `n = 10⁶`,
-/// enough to perceptibly bias `U_(i)`. With Kahan, the error reduces
-/// to `O(2⁻²⁴ · max|E_i|) ≈ O(ln n / 2²⁴)`, effectively constant.
-/// `f64` doesn't need it for any realistic `n`, but the cost is
-/// negligible (a few extra adds per element) so it is unconditional.
+/// All four prefix sums (`total`, the merge's `cumulative_w`, `G`,
+/// and the merge's `cumulative_e`) use Kahan compensated summation,
+/// reducing the f32 accumulator error from `O(n · 2⁻²⁴)` to
+/// `O(2⁻²⁴ · max|term|)` — effectively constant.
 ///
 /// The merge target is computed as `(total * u).min(total)`. The
 /// `.min` clips the rare floating-point case where `u_n = S_n / G`
 /// rounds up to `1.0` (in `f32`, this happens when `E_{n+1}/G` falls
 /// below `~2⁻²⁵`, which has probability `~3%` at `n = 10⁶`).
-/// Combined with same-order accumulation of `total` and the merge's
-/// `cumulative_w`, this guarantees the merge loop terminates within
-/// `weights.len()` without an explicit bounds check.
+/// Combined with bit-for-bit equality of `total` and the merge's
+/// final `cumulative_w` (both are deterministic Kahan sums of the
+/// same weight sequence from `(0, 0)`), this guarantees the merge
+/// loop terminates within `weights.len()` without an explicit bounds
+/// check.
 ///
 /// # Preconditions
 /// - `weights` is nonempty.
@@ -511,21 +435,14 @@ pub fn resample_indices<F: BetaFloat, R: Rng + ?Sized>(
 /// - All entries of `weights` are finite and nonnegative.
 /// - The sum of `weights` is strictly positive.
 ///
-/// # Precision
-/// With `F = f32` the prefix-sum-of-weights accumulator accrues
-/// `O(n · 2⁻²⁴)` relative error; recommended `n ≤ 2¹⁶`. Beyond that
-/// switch to `F = f64`. The Kahan-protected `G` and `cumulative_e`
-/// accumulators introduced by this routine are not the limiting
-/// factor — the weight sum is.
-///
 /// # Panics
 /// Panics if `weights.is_empty()` or if `scratch.len() != out.len()`.
 /// Panics in debug if weights are non-finite/negative or sum to zero.
-pub fn resample_indices_buffered<F: BetaFloat, R: Rng + ?Sized>(
+pub fn resample_indices_buffered<R: Rng + ?Sized>(
     rng: &mut R,
-    weights: &[F],
+    weights: &[f32],
     out: &mut [usize],
-    scratch: &mut [F],
+    scratch: &mut [f32],
 ) {
     assert!(!weights.is_empty(), "weights must be nonempty");
     assert_eq!(
@@ -538,57 +455,51 @@ pub fn resample_indices_buffered<F: BetaFloat, R: Rng + ?Sized>(
         return;
     }
 
-    // Same-order accumulation invariant (see Lemma 3 in README): walk
-    // `weights` here in index order, then again in the merge below, so
-    // the final `cumulative_w` equals `total` bit-for-bit.
-    let mut total = F::zero();
+    // Kahan-sum total weight; bit-for-bit reproducible against the
+    // merge's incremental walk below (Lemma 3).
+    let mut total = 0.0_f32;
+    let mut total_c = 0.0_f32;
     for &w in weights {
         debug_assert!(
-            w.is_finite() && w >= F::zero(),
+            w.is_finite() && w >= 0.0,
             "weight must be finite and ≥ 0"
         );
-        total = total + w;
+        kahan_add(&mut total, &mut total_c, w);
     }
-    debug_assert!(total > F::zero(), "total weight must be strictly positive");
+    debug_assert!(total > 0.0, "total weight must be strictly positive");
 
     // Phase 1: fill scratch with E_1..E_n, Kahan-accumulate G including
     // E_{n+1}. Storing E_{n+1} is unnecessary — we only need its
     // contribution to G so that S_n / G < 1 strictly.
-    let mut g = F::zero();
-    let mut g_c = F::zero();
+    let mut g = 0.0_f32;
+    let mut g_c = 0.0_f32;
     for slot in scratch.iter_mut() {
-        let e = F::sample_exp1(rng);
+        let e: f32 = Exp1.sample(rng);
         *slot = e;
-        let y = e - g_c;
-        let t = g + y;
-        g_c = (t - g) - y;
-        g = t;
+        kahan_add(&mut g, &mut g_c, e);
     }
-    let e_extra = F::sample_exp1(rng);
-    let y = e_extra - g_c;
-    g = g + y; // last add; compensation no longer needed
+    let e_extra: f32 = Exp1.sample(rng);
+    kahan_add(&mut g, &mut g_c, e_extra);
 
     // Phase 2: walk scratch left-to-right. cumulative_e accumulates
-    // S_i = E_1 + … + E_i (also Kahan); u_i = S_i / G is the i-th
-    // sorted uniform. Merge against weights with the safeguard
-    // `target.min(total)`; see the doc comment above.
-    let inv_g = F::one() / g;
-    let mut cumulative_e = F::zero();
-    let mut ce_c = F::zero();
+    // S_i = E_1 + … + E_i (Kahan); u_i = S_i / G is the i-th sorted
+    // uniform. Merge against weights with Kahan on `cumulative_w` and
+    // the safeguard `target.min(total)`; see the doc comment above.
+    let inv_g = 1.0 / g;
+    let mut cumulative_e = 0.0_f32;
+    let mut ce_c = 0.0_f32;
     let mut j: usize = 0;
     let mut cumulative_w = weights[0];
+    let mut cumulative_w_c = 0.0_f32;
 
     for (slot_in, slot_out) in scratch.iter().zip(out.iter_mut()) {
-        let y = *slot_in - ce_c;
-        let t = cumulative_e + y;
-        ce_c = (t - cumulative_e) - y;
-        cumulative_e = t;
+        kahan_add(&mut cumulative_e, &mut ce_c, *slot_in);
 
         let u = cumulative_e * inv_g;
         let target = (total * u).min(total);
         while target > cumulative_w {
             j += 1;
-            cumulative_w = cumulative_w + weights[j];
+            kahan_add(&mut cumulative_w, &mut cumulative_w_c, weights[j]);
         }
         *slot_out = j;
     }

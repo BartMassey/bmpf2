@@ -9,20 +9,40 @@ resampling pass.
 
 ## Features
 
-The crate exposes both implementations under feature gates:
+The crate has two orthogonal feature axes: backend (`pow` / `rejection`,
+exactly one) and math source (`std` / `libm`, exactly one).
 
+Backend:
 - `pow` (default): direct `u.powf(1.0 / k)`.
 - `rejection`: Exp(1)-proposal rejection sampling with log-space acceptance.
 
-`beta_k_1` dispatches to whichever is enabled (preferring `pow` if both are
-enabled, with `pow` being the most common case). The two underlying
-functions `beta_k_1_pow` and `beta_k_1_rejection` are always available
-regardless of features, so tests and benchmarks can exercise both.
+Math source:
+- `std` (default): use std's inherent `f32::ln` / `f32::powf`.
+- `libm`: use the [libm] crate via [num-traits] for `ln` / `powf`.
+  Suitable for bare-metal `no_std` targets.
+
+`beta_k_1` dispatches to whichever backend is enabled (preferring `pow`
+if both are enabled). The two underlying functions `beta_k_1_pow` and
+`beta_k_1_rejection` are always available regardless of features, so
+tests and benchmarks can exercise both.
+
+All public APIs are `f32`. The library performs no allocation —
+caller-supplied slices throughout — and is suitable for use on Cortex-M4F
+and other single-precision FPU targets. See the *Numerical robustness*
+section below for the precision discussion.
 
 ```toml
+# Default (std + pow):
 [dependencies]
-beta_k1 = { version = "0.1", default-features = false, features = ["rejection"] }
+beta_k1 = "0.1"
+
+# no_std with the rejection backend:
+[dependencies]
+beta_k1 = { version = "0.1", default-features = false, features = ["rejection", "libm"] }
 ```
+
+[libm]: https://crates.io/crates/libm
+[num-traits]: https://crates.io/crates/num-traits
 
 ## Algorithm: Exp(1)-proposal rejection
 
@@ -99,28 +119,28 @@ vectorized `pow` over runs of consecutive iterations — inflating apparent
 `pow` throughput far above what a Cortex-M can achieve. The shipped
 microbench wraps each call in `std::hint::black_box` to defeat this.
 
-With `black_box` fences on a modern x86:
+With `black_box` fences on a modern x86 (f32 path):
 
 ```
-  k    pow (ns/sample)    rejection (ns/sample)    rej/pow
-  2          26.0                  51.4              1.98x
-  5          26.1                  45.7              1.75x
-  10         26.1                  45.9              1.76x
-  50         26.0                  36.7              1.41x
-  200        26.2                  35.7              1.36x
-  1000       26.1                  35.6              1.36x
+  k     pow (ns/sample)    rejection (ns/sample)    rej/pow
+  2           9.30                  28.66            3.08x
+  5           9.34                  24.17            2.59x
+  10          9.29                  21.96            2.36x
+  50          9.33                  20.63            2.21x
+  200         9.29                  20.14            2.17x
+  1000        9.24                  20.00            2.16x
 ```
 
-Without `black_box`, the same machine reported `pow` at ~3 ns/sample —
-nearly 10× faster. That number is real for vectorizable workloads but is
-not representative of scalar per-call cost on hardware without SIMD.
+Without `black_box`, SIMD vectorization on the same host reports `pow`
+several times faster than this. That throughput is real for
+vectorizable workloads but is not representative of scalar per-call
+cost on hardware without SIMD.
 
-The `pow` path wins on this host, but the gap is much smaller than the
-unfenced numbers suggested. On a Cortex-M4F with a typical embedded libm,
-where scalar `powf` may take 100+ cycles versus a `logf` of 30–50 cycles
-plus an Exp(1) draw, the rejection path may win — particularly for moderate
-to large k where the M_k overhead is small. **Benchmark on your actual
-target before choosing.**
+The `pow` path wins on this host. On a Cortex-M4F with a typical
+embedded libm, where scalar `powf` may take 100+ cycles versus a
+`logf` of 30–50 cycles plus an Exp(1) draw, the rejection path may
+win — particularly for moderate to large k where the M_k overhead is
+small. **Benchmark on your actual target before choosing.**
 
 ## Background: the squeeze that wasn't
 
@@ -149,19 +169,38 @@ resample_indices(&mut rng, &weights, &mut out);
 // proportional to weight, sorted ascending.
 ```
 
-`resample_indices` runs in O(`weights.len()` + `out.len()`) time. The
-streaming sorted-uniforms generator is also exposed:
+`resample_indices` runs in O(`weights.len()` + `out.len()`) time. It is
+streaming — one `pow` call per output index, no scratch buffer. A
+buffered variant trades one extra `n`-element scratch buffer for
+faster per-element cost (no `pow` per element):
+
+```rust
+use beta_k1::resample_indices_buffered;
+
+let weights = vec![1.0, 3.0, 2.0, 4.0];
+let mut out = vec![0usize; 1000];
+let mut scratch = vec![0.0_f32; 1000];   // length must equal out.len()
+resample_indices_buffered(&mut rng, &weights, &mut out, &mut scratch);
+```
+
+On the host x86 with the `pow` backend, `resample_indices_buffered`
+runs at ~12 ns/step against ~15 ns/step for `resample_indices` (~1.30×
+faster). On hardware with a slower `powf` (e.g. Cortex-M4F), the gap
+is expected to widen.
+
+The streaming sorted-uniforms generator is also exposed:
 
 ```rust
 use beta_k1::SortedUniforms;
 for u in SortedUniforms::new(&mut rng, 100) {
-    // u_1 ≤ u_2 ≤ ... ≤ u_100, all in [0, 1)
+    // u_1 ≤ u_2 ≤ ... ≤ u_100, all in [0, 1]
 }
 ```
 
-The output indices from `resample_indices` come out in ascending order,
-which is what most downstream code (e.g. gathering particles into a new
-buffer) wants anyway. If you need them shuffled, do that as a post-pass.
+The output indices from both resamplers come out in ascending order,
+which is what most downstream code (e.g. gathering particles into a
+new buffer) wants anyway. If you need them shuffled, do that as a
+post-pass.
 
 ### Mathematical correctness
 
@@ -312,55 +351,88 @@ Suppose `weights[i]` are finite and nonnegative with positive sum. Then
 the values yielded by `SortedUniforms`, provided those values lie in
 [0, 1].
 
-*Proof.* `total` is computed by
+*Proof.* `total` is computed by Kahan compensated summation walking
+`weights` in index order, starting from compensated state
+`(sum, c) = (0, 0)`:
 
 ```
-total = 0; for w in weights: total += w
+(total, total_c) = (0, 0)
+for w in weights:
+    (total, total_c) = kahan_add(total, total_c, w)
 ```
 
-processing `weights` in index order. When `j` reaches `m − 1` in the
-merge, `cumulative` has been built by initializing `cumulative = weights[0]`
-and then executing `cumulative += weights[k]` for k = 1, 2, ..., m − 1
-in order — visiting weights in the same order with the same accumulator
-type (f64). IEEE 754 binary floating-point addition is deterministic and
-is a function only of its operands and rounding mode (round-to-nearest
-in Rust by default), so the two sequences yield bit-identical results:
-`cumulative == total` exactly when `j = m − 1`.
+When `j` reaches `m − 1` in the merge, `(cumulative, cumulative_c)`
+has been built by initializing `(cumulative, cumulative_c) = (weights[0], 0)`
+(equivalent to one Kahan step from `(0, 0)`, since the first
+compensator update yields zero) and then executing
+`kahan_add(cumulative, cumulative_c, weights[k])` for k = 1, 2, ...,
+m − 1 in order — visiting weights in the same order with the same
+accumulator algorithm. IEEE 754 binary floating-point addition is
+deterministic and a function only of its operands and rounding mode
+(round-to-nearest in Rust by default), so Kahan summation, built
+purely from such adds and subtracts, is also deterministic. The two
+sequences therefore yield bit-identical results: `cumulative == total`
+exactly when `j = m − 1`.
 
 Each value `u` yielded by `SortedUniforms` satisfies `u ≤ 1` (the
-recurrence preserves this; see edge-case note below). Therefore
-`target = total · u ≤ total = cumulative`, so the strict inequality
-`target > cumulative` is false and the while loop exits with
+recurrence preserves this; see edge-case note below). Furthermore,
+since `total` is an `f32`-representable value and `u ∈ [0, 1]`, the
+exact product `total · u` is bounded above by `total`; in
+round-to-nearest f32 this rounds to a representable value `≤ total`
+(because `total` itself is representable, every value `< total`
+rounds to a representable value `≤ total`). Therefore
+`target ≤ total = cumulative` whenever `j = m − 1`, and the strict
+inequality `target > cumulative` is false: the while loop exits with
 `j = m − 1` rather than incrementing further.       ∎
 
-**Edge case.** Strictly: if `beta_k_1(rng, k)` ever returns exactly 0
-(possible for the `pow` backend if the underlying uniform draw is exactly
-0, probability `2⁻⁵³` per draw), then `spacing = 1.0`, the recurrence
-sets `last = 1.0`, and all subsequent yielded values equal 1. The merge
-then sets `target = total` exactly; Lemma 3 still holds (the proof above
-uses `u ≤ 1`, not the strict version). The statistical effect, however,
-is that all subsequent index draws collapse to the last index, which is
-incorrect. The probability of this occurring at least once during a
-resampling pass of n outputs is bounded by `n·2⁻⁵³`, of order `10⁻¹⁰`
-for n = 10⁶, far below the noise floor of any practical experiment.
-The `rejection` backend is not subject to this edge case (its output
-is strictly less than 1 by construction).
+**Edge case.** Both backends return values strictly in `(0, 1)` for
+practical purposes:
+
+- `beta_k_1_pow` redraws if the underlying uniform `u` is exactly 0
+  (probability ~2⁻²³ per call in `f32`), so `spacing = 1 − u^(1/k) < 1`
+  always. There is a separate `f32` quantization issue: `u.powf(1/k)`
+  can round to exactly `1.0` when `u` is sufficiently close to 1
+  (probability `~2⁻²⁴` per call). When this happens, `spacing = 0`
+  and the recurrence yields the prior `last` again — a vanishing
+  statistical artifact (one repeated index out of `~2²⁴`), and not a
+  Lemma 3 violation since `last ≤ 1` is preserved.
+- The `rejection` backend returns `1 − y/k` with `y > 0` strictly, so
+  its output is in `(0, 1)` exactly.
+
+In neither backend does `last` collapse to 1 prematurely, so the
+distribution of the yielded variates matches Theorem 1 to within
+`f32` quantization.
 
 ### Numerical robustness
 
-Beyond the boundary argument: the merge accumulates `cumulative` in
-left-to-right order, which is the standard direction for prefix sums
-and is well-conditioned for non-negative summands. We do not use Kahan
-summation; the relative error in `cumulative` is bounded by `O(m · ε)`
-where ε ≈ 2.22·10⁻¹⁶, which is negligible compared to per-step
-quantization error in the `f64` representation of weights and uniforms.
+The library is `f32` throughout, with `ε = 2⁻²⁴ ≈ 6·10⁻⁸`. Beyond the
+boundary argument, the precision concern is the prefix sums: a naive
+running sum over `n` non-negative terms accrues relative error of
+order `O(n · ε)`, which becomes unusable around `n ≈ 10⁵`. The
+library therefore uses **Kahan compensated summation** for every
+multi-term accumulator on the data path:
+
+- `total = Σ weights` and the merge's incremental `cumulative_w` in
+  both `resample_indices` and `resample_indices_buffered`.
+- `G = Σ E_i` and the merge's `cumulative_e = S_i = E_1 + ... + E_i`
+  in `resample_indices_buffered`.
+
+This reduces the bound on each accumulator's relative error from
+`O(n · ε)` to `O(ε)` — effectively constant in `n`.
 
 Producing exact bit-identical `total` and `cumulative` at the right
-endpoint depends on the same accumulation order being used in both
-places. This is guaranteed in the current implementation by both passes
-iterating `weights` via `&[f64]` indexing in increasing index order;
-changing either to a parallel reduce or a different traversal would
+endpoint depends on the same accumulation algorithm and traversal
+order being used in both places. This is guaranteed in the current
+implementation by both passes Kahan-summing `weights` in increasing
+index order from `(sum, c) = (0, 0)`; changing either to a parallel
+reduce, a different traversal, or a non-Kahan accumulator would
 require revisiting Lemma 3.
+
+`resample_indices_buffered` additionally applies a `target.min(total)`
+clip in the merge to handle the case where `u_n = S_n / G` rounds up
+to exactly `1.0` in `f32` (it can, with probability `~3%` at
+`n = 10⁶`, when `E_{n+1}/G` falls below `~2⁻²⁵`). This is a separate
+issue from the Lemma 3 boundary argument and not addressed by Kahan.
 
 ### Citations
 
@@ -385,26 +457,35 @@ require revisiting Lemma 3.
 
 ### Resampling performance
 
-Full-pipeline benchmark (m = n, weights = 1..=m, host-specific):
+Full-pipeline benchmark (m = n, weights = 1..=m, `f32`, host-specific):
 
 ```
-   m = n        ns/call   ns/step (m+n)
-     100           4497           22.5
-    1000          45339           22.7
-   10000         452461           22.6
-  100000        4488098           22.4
+    m = n     C ns/call   C ns/step    B ns/call   B ns/step    C/B
+      100         3174       15.87         2425       12.12     1.31x
+     1000        31968       15.98        24453       12.23     1.31x
+    10000       314165       15.71       242873       12.14     1.29x
+   100000      3108815       15.54      2399701       12.00     1.30x
+  1000000     31075298       15.54     23910144       11.96     1.30x
 ```
 
-Linear scaling is clean across four orders of magnitude. The per-step
-cost (~22 ns on the test machine, modern x86 with SIMD libm) is
-dominated by the Beta(k, 1) draw and the merge's floating-point work;
-cache effects don't materially degrade large-m performance because the
-weight array is touched in a single forward sweep.
+C = `resample_indices` (streaming Method C, no scratch). B =
+`resample_indices_buffered` (Method B, requires `n`-element scratch).
+Linear scaling is clean across five orders of magnitude. The per-step
+cost is dominated by the Beta(k, 1) draw (Method C) or the Exp(1) draw
+plus the merge (Method B); cache effects don't materially degrade
+large-m performance because the weight array is touched in a single
+forward sweep.
+
+The C/B ratio of ~1.3× on this host (modern x86 with SIMD libm)
+narrows because vectorized `pow` is fast here. On Cortex-M4F with no
+SIMD and a slower scalar `powf`, Method B is expected to win by a
+larger margin.
 
 ## Files
 
-- `src/lib.rs` — both Beta(k,1) implementations, the `SortedUniforms`
-  streaming iterator, and `resample_indices`.
+- `src/lib.rs` — both Beta(k, 1) implementations, the `SortedUniforms`
+  streaming iterator, `resample_indices` (Method C), and
+  `resample_indices_buffered` (Method B).
 - `src/main.rs` — test driver: KS tests, moment checks, chi-squared
   tests for resampling, fenced per-call microbench, full-pipeline bench.
 - `Cargo.toml` — package manifest with feature gates.
@@ -412,9 +493,17 @@ weight array is touched in a single forward sweep.
 ## Building
 
 ```
-# Default (pow):
+# Default (std + pow):
 cargo run --release --bin test_driver
 
-# Rejection only:
-cargo run --release --bin test_driver --no-default-features --features rejection
+# std + rejection:
+cargo run --release --bin test_driver --no-default-features --features std,rejection
+
+# no_std smoke tests (lib only — bin is gated to std):
+cargo build --release --no-default-features --features libm,pow
+cargo build --release --no-default-features --features libm,rejection
 ```
+
+For genuine `no_std` verification, build against an embedded target,
+e.g.: `cargo build --release --no-default-features --features libm,pow
+--target thumbv7em-none-eabihf`.
