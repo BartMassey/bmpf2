@@ -1,24 +1,30 @@
-//! Test driver for the Beta(k, 1) sampler.
+//! Statistical correctness driver and benchmark for `bmpf2`.
 //!
-//! Both `beta_k_1_pow` and `beta_k_1_rejection` are exercised regardless
-//! of which feature is selected; the driver uses them directly rather
-//! than going through the feature-gated `beta_k_1` dispatch.
+//! Both [`first_uniform_pow`] and [`first_uniform_rejection`] are
+//! exercised regardless of which feature is selected; the driver
+//! uses them directly rather than going through the feature-gated
+//! [`first_uniform`](bmpf2::first_uniform) dispatch.
 //!
-//! Statistical machinery (KS distance, chi-squared) is computed in `f64`
-//! locally inside the test driver, even though the library is `f32`-only.
-//! This is purely a host-side test convenience — none of this code ships
-//! to the embedded target.
+//! The tests here are statistical (KS distance, chi-squared
+//! goodness-of-fit, moment matching). They use fixed RNG seeds and
+//! pass deterministically with the current `rand` version, but
+//! tolerance-based statistical tests don't belong on the `cargo test`
+//! path: a `rand` minor bump can shift the RNG sequence and cause a
+//! threshold to trip on otherwise-correct code, and that's the wrong
+//! kind of CI failure. Run this binary explicitly:
 //!
-//! Microbench notes: `std::hint::black_box` is applied at every iteration
-//! boundary to prevent LLVM from fusing or vectorizing across calls. This
-//! is important because the goal is to compare per-call cost on hardware
-//! that lacks SIMD (Cortex-M), not to measure peak vectorized throughput
-//! on the host. Numbers will still be host-specific, but the *ratio*
-//! between the two methods should be more representative.
+//! ```bash
+//! cargo run --release --bin tests
+//! ```
+//!
+//! The binary also includes microbenchmarks for the per-call cost of
+//! the two backends and the full resampling pipeline, with
+//! `std::hint::black_box` fences at every iteration boundary to
+//! prevent LLVM from fusing or vectorizing across calls.
 
-use beta_k1::{
-    beta_k_1_max_of_uniforms, beta_k_1_pow, beta_k_1_rejection, resample_indices,
-    resample_indices_buffered, verify_acceptance_bound, SortedUniforms,
+use bmpf2::{
+    first_uniform_pow, first_uniform_rejection, resample_indices, resample_indices_buffered,
+    SortedUniforms,
 };
 use rand::rngs::StdRng;
 use rand::Rng;
@@ -29,7 +35,7 @@ use std::time::Instant;
 const KS_CRITICAL_001: f64 = 1.949; // 0.1% significance critical-value coefficient
 
 fn main() {
-    println!("=== Beta(k, 1) sampler test driver ===\n");
+    println!("=== bmpf2 statistical test driver ===\n");
 
     let mut all_passed = true;
 
@@ -41,7 +47,7 @@ fn main() {
     println!();
     all_passed &= test_ks_against_theory();
     println!();
-    all_passed &= test_ks_against_max_oracle();
+    all_passed &= test_ks_against_min_oracle();
     println!();
     all_passed &= test_sorted_uniforms_moments();
     println!();
@@ -79,11 +85,63 @@ fn main() {
     }
 }
 
-/// Test 1: A_k(Y) ≤ 1 across the support, i.e. M_k is correctly computed.
+// ---------------------------------------------------------------------------
+// Test-only utilities. Private to this binary since they're not part
+// of the library's contract — the naive oracle and the M_k sanity
+// check exist purely to validate the library's implementations.
+// ---------------------------------------------------------------------------
+
+/// Naive O(k) oracle: literally draw `k` uniforms and return the
+/// minimum. Used as a non-`pow`, non-rejection reference distribution
+/// in Test 5.
+fn min_of_k_uniforms_naive<R: Rng + ?Sized>(rng: &mut R, k: u32) -> f32 {
+    let mut m: f32 = 1.0;
+    for _ in 0..k {
+        let u: f32 = rng.gen();
+        if u < m {
+            m = u;
+        }
+    }
+    m
+}
+
+/// Verify that the supremum constant `M_k` used by
+/// `first_uniform_rejection` is correct: the acceptance probability
+/// `A_k(Y)` must satisfy `log A_k(Y) ≤ 0` for all `Y ∈ [0, k)`.
+/// Returns the maximum of `log A_k(Y)` observed on a fine grid;
+/// should be ≤ 0 (modulo floating-point error).
 ///
-/// Sanity check on the math, run in f64 (via `verify_acceptance_bound`)
-/// even though the library is f32-only — the choice of `M_k` is an
-/// analytic fact, not an artifact of the implementation's precision.
+/// Computed in `f64` because this is a sanity check on the *math*:
+/// the constant `M_k` is an analytic choice independent of the
+/// library's f32 commitment, and we want a tight check, not a check
+/// sloppy enough to absorb f32 evaluation error.
+fn verify_acceptance_bound(k: u32, n_grid: usize) -> f64 {
+    if k == 1 {
+        return 0.0;
+    }
+    let kf = k as f64;
+    let km1 = (k - 1) as f64;
+    let n_grid_f = n_grid as f64;
+    let log_m_k = km1 * (1.0 - 1.0 / kf).ln() + 1.0;
+
+    let mut max_log_accept: f64 = f64::NEG_INFINITY;
+    for i in 1..n_grid {
+        let y = kf * (i as f64) / n_grid_f;
+        let log_accept = km1 * (1.0 - y / kf).ln() + y - log_m_k;
+        if log_accept > max_log_accept {
+            max_log_accept = log_accept;
+        }
+    }
+    max_log_accept
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+/// Test 1: A_k(Y) ≤ 1 across the support, i.e. M_k is correctly
+/// computed. Run in f64 — sanity check on the math, not on the f32
+/// implementation.
 fn test_acceptance_bound() -> bool {
     println!("[Test 1] log A_k(Y) ≤ 0 across the support (M_k is correct sup)");
     let mut all_ok = true;
@@ -107,8 +165,8 @@ fn test_range() -> bool {
     let mut all_ok = true;
     for &k in &[1u32, 2, 3, 5, 10, 100, 1000] {
         for _ in 0..100_000 {
-            let x_pow = beta_k_1_pow(&mut rng, k);
-            let x_rej = beta_k_1_rejection(&mut rng, k);
+            let x_pow = first_uniform_pow(&mut rng, k);
+            let x_rej = first_uniform_rejection(&mut rng, k);
             if x_pow.is_nan() || x_pow < 0.0 || x_pow > 1.0 {
                 println!("  pow:       k={}: out-of-range {:+e}", k, x_pow);
                 all_ok = false;
@@ -127,26 +185,26 @@ fn test_range() -> bool {
     all_ok
 }
 
-/// Test 3: Empirical moments match closed-form Beta(k, 1) values.
+/// Test 3: Empirical moments match closed-form Beta(1, k) values.
 ///
-/// For X ~ Beta(k, 1):  `E[X] = k/(k+1)`,  `Var[X] = k / [(k+1)^2 (k+2)]`.
+/// For X ~ Beta(1, k):  `E[X] = 1/(k+1)`,  `Var[X] = k / [(k+1)^2 (k+2)]`.
 fn test_moments() -> bool {
-    println!("[Test 3] Empirical moments match Beta(k, 1) closed form (rejection impl)");
+    println!("[Test 3] Empirical moments match Beta(1, k) closed form (rejection impl)");
     let mut rng = StdRng::seed_from_u64(0xDEADBEEF);
     let mut all_ok = true;
     let n_samples = 1_000_000;
 
     for &k in &[1u32, 2, 3, 5, 10, 50, 200] {
         let kf = k as f64;
-        let theoretical_mean = kf / (kf + 1.0);
+        let theoretical_mean = 1.0 / (kf + 1.0);
         let theoretical_var = kf / ((kf + 1.0).powi(2) * (kf + 2.0));
 
-        // Accumulate in f64 to keep stat noise from float-precision in the
-        // sample type out of the test's own machinery.
+        // Accumulate in f64 to keep stat noise from float-precision
+        // in the sample type out of the test's own machinery.
         let mut sum = 0.0_f64;
         let mut sum_sq = 0.0_f64;
         for _ in 0..n_samples {
-            let x = beta_k_1_rejection(&mut rng, k) as f64;
+            let x = first_uniform_rejection(&mut rng, k) as f64;
             sum += x;
             sum_sq += x * x;
         }
@@ -177,16 +235,17 @@ fn test_moments() -> bool {
     all_ok
 }
 
-/// Test 4: KS test of the rejection sampler against the analytic CDF F_k(x) = x^k.
+/// Test 4: KS test of the rejection sampler against the analytic
+/// CDF of Beta(1, k): `F_k(x) = 1 − (1 − x)^k`.
 fn test_ks_against_theory() -> bool {
-    println!("[Test 4] KS test of rejection sampler vs. F_k(x) = x^k");
+    println!("[Test 4] KS test of rejection sampler vs. F_k(x) = 1 − (1−x)^k");
     let mut rng = StdRng::seed_from_u64(0x12345678);
     let mut all_ok = true;
     let n = 50_000;
 
     for &k in &[1u32, 2, 3, 5, 10, 50, 200] {
         let mut samples: Vec<f64> = (0..n)
-            .map(|_| beta_k_1_rejection(&mut rng, k) as f64)
+            .map(|_| first_uniform_rejection(&mut rng, k) as f64)
             .collect();
         samples.sort_by(|a, b| a.partial_cmp(b).unwrap());
 
@@ -195,7 +254,7 @@ fn test_ks_against_theory() -> bool {
         for (i, &x) in samples.iter().enumerate() {
             let f_emp_above = (i + 1) as f64 / n as f64;
             let f_emp_below = i as f64 / n as f64;
-            let f_theory = x.powf(kf);
+            let f_theory = 1.0 - (1.0 - x).powf(kf);
             let d = (f_emp_above - f_theory)
                 .abs()
                 .max((f_theory - f_emp_below).abs());
@@ -218,9 +277,10 @@ fn test_ks_against_theory() -> bool {
     all_ok
 }
 
-/// Test 5: Two-sample KS — rejection sampler vs. the max-of-k-uniforms oracle.
-fn test_ks_against_max_oracle() -> bool {
-    println!("[Test 5] Two-sample KS: rejection vs. max-of-k-uniforms oracle");
+/// Test 5: Two-sample KS — rejection sampler vs. the
+/// min-of-k-uniforms oracle.
+fn test_ks_against_min_oracle() -> bool {
+    println!("[Test 5] Two-sample KS: rejection vs. min-of-k-uniforms oracle");
     let mut rng_a = StdRng::seed_from_u64(0xAAAA_AAAA);
     let mut rng_b = StdRng::seed_from_u64(0xBBBB_BBBB);
     let mut all_ok = true;
@@ -228,10 +288,10 @@ fn test_ks_against_max_oracle() -> bool {
 
     for &k in &[2u32, 3, 5, 10, 50] {
         let mut a: Vec<f64> = (0..n)
-            .map(|_| beta_k_1_rejection(&mut rng_a, k) as f64)
+            .map(|_| first_uniform_rejection(&mut rng_a, k) as f64)
             .collect();
         let mut b: Vec<f64> = (0..n)
-            .map(|_| beta_k_1_max_of_uniforms(&mut rng_b, k) as f64)
+            .map(|_| min_of_k_uniforms_naive(&mut rng_b, k) as f64)
             .collect();
         a.sort_by(|x, y| x.partial_cmp(y).unwrap());
         b.sort_by(|x, y| x.partial_cmp(y).unwrap());
@@ -275,8 +335,8 @@ fn two_sample_ks(a: &[f64], b: &[f64]) -> f64 {
 // Resampling tests
 // ===========================================================================
 
-/// Test 6: Empirical mean and variance of each order statistic position
-/// match closed-form values.
+/// Test 6: Empirical mean and variance of each order statistic
+/// position match closed-form values.
 ///
 /// For the i-th of n sorted uniforms (1-indexed):
 ///   E[U_(i)]   = i / (n + 1)
@@ -461,8 +521,9 @@ where
     all_ok
 }
 
-/// Test 9: Resampling matches naive multinomial sampling, by two-sample
-/// chi-squared on the index-count vectors. Runs once per resampler.
+/// Test 9: Resampling matches naive multinomial sampling, by
+/// two-sample chi-squared on the index-count vectors. Runs once per
+/// resampler.
 fn test_resample_vs_multinomial<Resampler>(method: &str, mut resample: Resampler) -> bool
 where
     Resampler: FnMut(&mut StdRng, &[f32], &mut [usize]),
@@ -565,8 +626,9 @@ fn naive_multinomial<R: Rng + ?Sized>(rng: &mut R, weights: &[f32], out: &mut [u
     }
 }
 
-/// Microbenchmark with `black_box` fences at every call boundary to defeat
-/// LLVM autovectorization, fusion, and inlining-driven cross-call CSE.
+/// Microbenchmark with `black_box` fences at every call boundary to
+/// defeat LLVM autovectorization, fusion, and inlining-driven
+/// cross-call CSE.
 fn bench() {
     println!("[Bench] Per-call cost (black_box-fenced, 1M samples per k)");
     bench_per_call();
@@ -590,8 +652,8 @@ fn bench_per_call() {
     );
 
     for &k in &[2u32, 5, 10, 50, 200, 1000] {
-        let pow_ns = bench_one(black_box(k), n, |rng, kk| beta_k_1_pow(rng, kk));
-        let rej_ns = bench_one(black_box(k), n, |rng, kk| beta_k_1_rejection(rng, kk));
+        let pow_ns = bench_one(black_box(k), n, |rng, kk| first_uniform_pow(rng, kk));
+        let rej_ns = bench_one(black_box(k), n, |rng, kk| first_uniform_rejection(rng, kk));
         println!(
             "  {:5}  {:16.2}  {:16.2}  {:9.2}x",
             k,

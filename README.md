@@ -1,11 +1,16 @@
-# `beta_k_1` — sampling Beta(k, 1) for linear-time perfect resampling
+# `bmpf2` — Sequential Importance Resampling primitives
 
-A Rust library for drawing X ~ Beta(k, 1), the distribution of the maximum
-of k i.i.d. Uniform(0, 1) variates. Equivalently, X is distributed as
-`U^(1/k)` for U ~ Uniform(0, 1). This is the per-step variate distribution
-needed by the linear-time perfect weighted resampling algorithm of Massey
-(ICASSP 2008), where k decreases from n down to 1 over the course of a
-resampling pass.
+A Rust library for the per-step variates and merge needed by linear-time
+perfect weighted resampling (Sequential Importance Resampling, SIR), used
+in Bayesian particle filters and elsewhere. Implements the algorithm of
+Massey (ICASSP 2008).
+
+The core variate is the **minimum of `k` iid Uniform(0, 1) draws** —
+equivalently `Beta(1, k)` in the standard parametrization — which is the
+per-step "spacing" distribution in the order-statistic recurrence used to
+generate `n` sorted uniforms in O(n) time. Exposed as
+[`first_uniform`](https://docs.rs/bmpf2) (with named-backend variants
+`first_uniform_pow` and `first_uniform_rejection`).
 
 ## Features
 
@@ -21,10 +26,10 @@ Math source:
 - `libm`: use the [libm] crate via [num-traits] for `ln` / `powf`.
   Suitable for bare-metal `no_std` targets.
 
-`beta_k_1` dispatches to whichever backend is enabled (preferring `pow`
-if both are enabled). The two underlying functions `beta_k_1_pow` and
-`beta_k_1_rejection` are always available regardless of features, so
-tests and benchmarks can exercise both.
+`first_uniform` dispatches to whichever backend is enabled (preferring
+`pow` if both are enabled). The two underlying functions
+`first_uniform_pow` and `first_uniform_rejection` are always available
+regardless of features, so tests and benchmarks can exercise both.
 
 All public APIs are `f32`. The library performs no allocation —
 caller-supplied slices throughout — and is suitable for use on Cortex-M4F
@@ -34,11 +39,11 @@ section below for the precision discussion.
 ```toml
 # Default (std + pow):
 [dependencies]
-beta_k1 = "0.1"
+bmpf2 = "0.1"
 
 # no_std with the rejection backend:
 [dependencies]
-beta_k1 = { version = "0.1", default-features = false, features = ["rejection", "libm"] }
+bmpf2 = { version = "0.1", default-features = false, features = ["rejection", "libm"] }
 ```
 
 [libm]: https://crates.io/crates/libm
@@ -53,19 +58,20 @@ draw Y ~ Exp(1)
 if Y ≥ k: reject
 draw V ~ Uniform(0, 1)
 accept iff log V < (k-1)·log(1 - Y/k) + Y - log M_k
-return X = 1 - Y/k
+return X = Y / k
 ```
 
-where `log M_k = (k-1) · log(1 - 1/k) + 1`. For k = 1, return U directly.
+where `log M_k = (k-1) · log(1 - 1/k) + 1`. For k = 1, return U directly
+(`Beta(1, 1)` is just Uniform).
 
 ## Proof of correctness for the rejection sampler
 
-**Setup.** The target density is `f_k(x) = k · x^(k-1)` on `[0, 1]`.
-Apply the change of variables `Y = k(1 - X)`, so `X = 1 - Y/k` and
-`dY = -k · dX`. The density of Y is
+**Setup.** The target density is `f_k(x) = k · (1 - x)^(k-1)` on
+`[0, 1]` (i.e. `Beta(1, k)`). Apply the change of variables `Y = k · X`,
+so `X = Y/k` and `dY = k · dX`. The density of Y is
 
 ```
-f_Y(y) = f_k(1 - y/k) · (1/k) = (1 - y/k)^(k-1)        for y ∈ [0, k].
+f_Y(y) = f_k(y/k) · (1/k) = (1 - y/k)^(k-1)        for y ∈ [0, k].
 ```
 
 **Proposal.** We propose Y' ~ Exp(1), with density `g(y) = e^(-y)` on
@@ -109,7 +115,7 @@ probability of this rejection is `Pr[Y ≥ k] = e^(-k)`, which is tiny for
 any practical k.
 
 **Output.** Conditional on acceptance, Y is distributed as `f_Y`, so
-`X = 1 - Y/k` is distributed as `f_k`. ∎
+`X = Y/k` is distributed as `f_k = Beta(1, k)`. ∎
 
 ## Performance
 
@@ -156,11 +162,11 @@ across n) and is not retained here.
 
 ## Linear-time perfect weighted resampling
 
-The crate provides the resampling algorithm that motivated the Beta(k, 1)
-sampler in the first place.
+The crate provides the resampling algorithm that motivated the
+`first_uniform` sampler in the first place.
 
 ```rust
-use beta_k1::resample_indices;
+use bmpf2::resample_indices;
 
 let weights = vec![1.0, 3.0, 2.0, 4.0];
 let mut out = vec![0usize; 1000];
@@ -170,12 +176,13 @@ resample_indices(&mut rng, &weights, &mut out);
 ```
 
 `resample_indices` runs in O(`weights.len()` + `out.len()`) time. It is
-streaming — one `pow` call per output index, no scratch buffer. A
-buffered variant trades one extra `n`-element scratch buffer for
-faster per-element cost (no `pow` per element):
+streaming — one `first_uniform` (and hence one `pow` or one rejection
+attempt) per output index, no scratch buffer. A buffered variant trades
+one extra `n`-element scratch buffer for faster per-element cost (no
+`first_uniform` per element):
 
 ```rust
-use beta_k1::resample_indices_buffered;
+use bmpf2::resample_indices_buffered;
 
 let weights = vec![1.0, 3.0, 2.0, 4.0];
 let mut out = vec![0usize; 1000];
@@ -191,7 +198,7 @@ is expected to widen.
 The streaming sorted-uniforms generator is also exposed:
 
 ```rust
-use beta_k1::SortedUniforms;
+use bmpf2::SortedUniforms;
 for u in SortedUniforms::new(&mut rng, 100) {
     // u_1 ≤ u_2 ≤ ... ≤ u_100, all in [0, 1]
 }
@@ -245,9 +252,7 @@ by the memoryless construction of order statistics.       ∎
 #### Lemma 2 (minimum of k uniforms)
 
 If `V₁, ..., Vₖ` are i.i.d. Uniform(0, 1) then `min(V₁, ..., Vₖ)` has CDF
-`F(v) = 1 − (1 − v)ᵏ` on [0, 1], i.e., `min(V₁, ..., Vₖ) ~ Beta(1, k)`.
-Equivalently, `1 − min(V₁, ..., Vₖ) ~ Beta(k, 1)` (it is distributed as
-`max(V₁, ..., Vₖ)`, by the symmetry `Vᵢ ↔ 1 − Vᵢ`).
+`F(v) = 1 − (1 − v)ᵏ` on [0, 1] — i.e., `min(V₁, ..., Vₖ) ~ Beta(1, k)`.
 
 *Proof.* `Pr[min Vᵢ > v] = Pr[V₁ > v] · ... · Pr[Vₖ > v] = (1 − v)ᵏ`.       ∎
 
@@ -261,9 +266,9 @@ distributed as the order statistics of n i.i.d. Uniform(0, 1) variates.
 yield, with `last₀ = 0`.
 
 *Base case (i = 1).* On the first call, `remaining = n` and `last = 0`.
-The iterator computes `spacing = 1 − beta_k_1(rng, n)`. By construction
-of `beta_k_1`, this `spacing` is distributed as `Beta(1, n)`, which by
-Lemma 2 is the distribution of the minimum of n i.i.d. Uniform(0, 1)
+The iterator computes `spacing = first_uniform(rng, n)`. By construction
+of `first_uniform`, this `spacing` is distributed as `Beta(1, n)`, which
+by Lemma 2 is the distribution of the minimum of n i.i.d. Uniform(0, 1)
 variates — i.e., the distribution of `U₍₁₎`. The yielded value is
 `last + (1 − last) · spacing = spacing`, and `last₁ = spacing`. So
 `last₁ ~ U₍₁₎`. ✓
@@ -274,7 +279,7 @@ statistics of n i.i.d. Uniform(0, 1). The iterator now has
 `remaining = n − i` and proceeds:
 
 ```
-spacing = 1 − beta_k_1(rng, n − i)
+spacing = first_uniform(rng, n − i)
 yield   = lastᵢ + (1 − lastᵢ) · spacing
 lastᵢ₊₁ = yield
 ```
@@ -289,8 +294,8 @@ U₍ᵢ₊₁₎ - u  ~  (1 − u) · min(W₁, ..., Wₙ₋ᵢ)
 ```
 
 where `W₁, ..., Wₙ₋ᵢ` are i.i.d. Uniform(0, 1). By Lemma 2,
-`min(W₁, ..., Wₙ₋ᵢ) ~ Beta(1, n − i)`, which equals
-`1 − beta_k_1(rng, n − i)` in distribution — exactly `spacing`.
+`min(W₁, ..., Wₙ₋ᵢ) ~ Beta(1, n − i)`, which is exactly the
+distribution of `first_uniform(rng, n − i)` — i.e. `spacing`.
 Therefore `lastᵢ₊₁ = lastᵢ + (1 − lastᵢ) · spacing` has the same
 conditional distribution given `lastᵢ` as `U₍ᵢ₊₁₎` has given `U₍ᵢ₎`,
 and the inductive hypothesis extends to step i + 1.       ∎
@@ -385,23 +390,26 @@ rounds to a representable value `≤ total`). Therefore
 inequality `target > cumulative` is false: the while loop exits with
 `j = m − 1` rather than incrementing further.       ∎
 
-**Edge case.** Both backends return values strictly in `(0, 1)` for
+**Edge case.** Both backends return values strictly in `[0, 1)` for
 practical purposes:
 
-- `beta_k_1_pow` redraws if the underlying uniform `u` is exactly 0
-  (probability ~2⁻²³ per call in `f32`), so `spacing = 1 − u^(1/k) < 1`
-  always. There is a separate `f32` quantization issue: `u.powf(1/k)`
-  can round to exactly `1.0` when `u` is sufficiently close to 1
-  (probability `~2⁻²⁴` per call). When this happens, `spacing = 0`
-  and the recurrence yields the prior `last` again — a vanishing
-  statistical artifact (one repeated index out of `~2²⁴`), and not a
-  Lemma 3 violation since `last ≤ 1` is preserved.
-- The `rejection` backend returns `1 − y/k` with `y > 0` strictly, so
-  its output is in `(0, 1)` exactly.
+- `first_uniform_pow` returns `1 − u^(1/k)` and redraws if the
+  underlying uniform `u` is exactly 0 (probability ~2⁻²³ per call in
+  `f32`). The redraw guards against returning exactly 1, which would
+  set `spacing = 1` and freeze `last` at 1 thereafter. There is a
+  separate `f32` quantization issue going the other way:
+  `u.powf(1/k)` can round to exactly `1.0` when `u` is close to 1
+  (probability `~2⁻²⁴` per call), making `1 − u^(1/k) = 0` and
+  `spacing = 0`; the recurrence then yields the prior `last` again
+  — a vanishing statistical artifact (one repeated value out of
+  `~2²⁴`), and not a Lemma 3 violation since `last ≤ 1` is
+  preserved.
+- The `rejection` backend returns `y/k` with `y > 0` strictly, so its
+  output is in `(0, 1)` exactly.
 
-In neither backend does `last` collapse to 1 prematurely, so the
-distribution of the yielded variates matches Theorem 1 to within
-`f32` quantization.
+In neither backend does `last` reach 1 (and stick) before the final
+yield, so the distribution of the yielded variates matches Theorem 1
+to within `f32` quantization.
 
 ### Numerical robustness
 
@@ -483,21 +491,27 @@ larger margin.
 
 ## Files
 
-- `src/lib.rs` — both Beta(k, 1) implementations, the `SortedUniforms`
-  streaming iterator, `resample_indices` (Method C), and
-  `resample_indices_buffered` (Method B).
-- `src/main.rs` — test driver: KS tests, moment checks, chi-squared
-  tests for resampling, fenced per-call microbench, full-pipeline bench.
+- `src/lib.rs` — top-level docs, re-exports, feature compile-errors.
+- `src/first_uniform.rs` — `first_uniform` dispatcher and the two
+  named-backend variants `first_uniform_pow` / `first_uniform_rejection`.
+- `src/sorted_uniforms.rs` — `SortedUniforms` iterator.
+- `src/resample.rs` — `resample_indices` (Method C) and
+  `resample_indices_buffered` (Method B), plus the private Kahan-add
+  helper.
+- `src/bin/tests.rs` — statistical correctness driver and microbench
+  (run via `cargo run --bin tests`; intentionally not on the
+  `cargo test` path because the tests are tolerance-based, not crisp
+  invariants).
 - `Cargo.toml` — package manifest with feature gates.
 
 ## Building
 
 ```
 # Default (std + pow):
-cargo run --release --bin test_driver
+cargo run --release --bin tests
 
 # std + rejection:
-cargo run --release --bin test_driver --no-default-features --features std,rejection
+cargo run --release --bin tests --no-default-features --features std,rejection
 
 # no_std smoke tests (lib only — bin is gated to std):
 cargo build --release --no-default-features --features libm,pow

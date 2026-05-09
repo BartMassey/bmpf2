@@ -1,5 +1,5 @@
 [package]
-name = "beta_k1"
+name = "bmpf2"
 version = "0.1.0"
 edition = "2021"
 
@@ -18,7 +18,7 @@ rejection = []
 
 # `std`: pulls in std's libm bindings via num-traits, plus rand's stdlib
 # integration (StdRng, Standard distribution etc.). Required to build
-# the test_driver binary.
+# the `tests` binary.
 std = ["num-traits/std", "rand/std", "rand/std_rng", "rand_distr/std"]
 
 # `libm`: routes transcendental math (`ln`, `powf`) through the `libm`
@@ -32,12 +32,12 @@ rand = { version = "0.8", default-features = false }
 rand_distr = { version = "0.4", default-features = false }
 
 [[bin]]
-name = "test_driver"
-path = "src/main.rs"
+name = "tests"
+path = "src/bin/tests.rs"
 # The driver uses Vec, Instant, println!, StdRng — std-only. Hide it
 # from no_std builds so they don't try (and fail) to compile it.
 required-features = ["std"]
 
 [lib]
-name = "beta_k1"
+name = "bmpf2"
 path = "src/lib.rs"
