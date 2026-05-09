@@ -1,6 +1,8 @@
 //! Streaming iterator yielding `n` Uniform(0, 1) variates in
 //! ascending order in O(n) time, via the order-statistic recurrence.
 
+use core::iter::FusedIterator;
+
 use rand::Rng;
 
 use crate::first_uniform::first_uniform;
@@ -52,4 +54,20 @@ impl<'a, R: Rng + ?Sized> Iterator for SortedUniforms<'a, R> {
         let r = self.remaining as usize;
         (r, Some(r))
     }
+
+    /// Returns the number of values still to be yielded, without
+    /// consuming them. Overrides the default implementation, which
+    /// would advance the RNG once per remaining value just to count.
+    fn count(self) -> usize {
+        self.remaining as usize
+    }
 }
+
+/// `SortedUniforms` knows its exact remaining length (returned by
+/// `size_hint`), so [`ExactSizeIterator::len`] is available.
+impl<'a, R: Rng + ?Sized> ExactSizeIterator for SortedUniforms<'a, R> {}
+
+/// Once `next()` has returned `None` (i.e. `remaining == 0`), all
+/// subsequent calls also return `None` — the recurrence has no way
+/// to restart.
+impl<'a, R: Rng + ?Sized> FusedIterator for SortedUniforms<'a, R> {}
