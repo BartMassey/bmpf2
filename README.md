@@ -1,35 +1,90 @@
 # `bmpf2` — Sequential Importance Resampling primitives
 
-A Rust library for the per-step variates and merge needed by linear-time
-perfect weighted resampling (Sequential Importance Resampling, SIR), used
-in Bayesian particle filters and elsewhere. Implements the algorithm of
-Massey (ICASSP 2008).
+A Rust library for **Sequential Importance Resampling (SIR) with
+replacement** — also known as **multinomial resampling** — the
+weighted-resampling step at the heart of Bayesian particle filters
+and other sequential Monte Carlo methods. Given an array of `n`
+non-negative weights, draws `n` indices into the array, each chosen
+iid (so with replacement) with probability proportional to its
+weight, in O(n) time. Implements the algorithm of Massey
+(ICASSP 2008).
 
-The core variate is the **minimum of `k` iid Uniform(0, 1) draws** —
-equivalently `Beta(1, k)` in the standard parametrization — which is the
-per-step "spacing" distribution in the order-statistic recurrence used to
-generate `n` sorted uniforms in O(n) time. Exposed as
-[`first_uniform`](https://docs.rs/bmpf2) (with named-backend variants
-`first_uniform_pow` and `first_uniform_rejection`).
+## Quick start
+
+```rust
+use bmpf2::resample_indices;
+use rand::SeedableRng;
+
+let mut rng = rand::rngs::StdRng::seed_from_u64(42);
+
+// Some weighted population. Weights need not be normalized.
+let weights = vec![1.0_f32, 3.0, 2.0, 4.0];
+
+// Resample 1000 indices from this distribution.
+let mut out = vec![0_usize; 1000];
+resample_indices(&mut rng, &weights, &mut out);
+
+// `out[i]` ∈ {0, 1, 2, 3}; index 3 (weight 4.0) appears about 4× as
+// often as index 0 (weight 1.0). Output is in ascending order.
+```
+
+## Background: Sequential Importance Resampling
+
+In a Bayesian particle filter you carry a population of `n` candidate
+states ("particles"), each with a weight that reflects how plausible
+that state is given the data observed so far. As more data arrives,
+the weights skew: most of the population ends up with negligible
+weight, while a handful of particles dominate. **Resampling** refreshes
+the population by drawing `n` new particles — each a copy of one of
+the old ones, **with replacement** — where each old particle's chance
+of being copied is proportional to its weight. Because draws are with
+replacement, a high-weight particle typically appears multiple times
+in the output; a low-weight one may not appear at all.
+
+The fundamental operation: turn an array of weights into a multiset
+of `n` indices, each chosen iid with probability proportional to
+weight. This is exactly a multinomial draw on the weight distribution
+— hence the standard name **multinomial resampling**. (Other
+resampling schemes used in particle filters — systematic, residual,
+stratified — produce a different joint distribution on the output
+multiset; this crate doesn't implement those. If you want one of the
+others, this isn't the crate for you.)
+
+The naive way takes O(n log n) time (cumulative sum + binary search
+per output) or O(n²) (scan per output). This crate runs in O(m + n)
+— where `m = weights.len()` and `n = out.len()` — using a trick due
+to Massey (2008): generate `n` sorted uniforms in `[0, 1)` in one
+O(n) pass, then merge them against the cumulative weight array in
+another O(m + n) pass. The output is statistically equivalent to `n`
+iid multinomial draws from the weight distribution.
+
+Two resamplers are exposed; pick whichever fits your memory budget:
+
+- `resample_indices` — **streaming**. No extra memory beyond the
+  output slice. One `powf` call per output index.
+- `resample_indices_buffered` — **buffered**. Caller supplies an
+  `n`-element scratch buffer; in exchange, the per-element cost
+  drops because it generates sorted uniforms via Gamma ratios
+  (Exp(1) draws) rather than `powf`. Typically ~1.3× faster on x86;
+  more on hardware with a slow `powf`.
+
+The order-statistic iterator behind `resample_indices` is also
+exposed as `SortedUniforms`, useful in its own right (e.g. for
+inverse-CDF sampling against any continuous distribution where you
+want sorted output).
+
+If you want resampling and don't care how it works, the *Quick start*
+above is all you need. The rest of this README covers the lower-level
+building blocks, the math behind why it's correct, and the
+floating-point arguments that keep it that way.
 
 ## Features
 
-The crate has two orthogonal feature axes: backend (`pow` / `rejection`,
-exactly one) and math source (`std` / `libm`, exactly one).
+The crate has one feature axis: math source (`std` / `libm`, exactly one).
 
-Backend:
-- `pow` (default): direct `u.powf(1.0 / k)`.
-- `rejection`: Exp(1)-proposal rejection sampling with log-space acceptance.
-
-Math source:
-- `std` (default): use std's inherent `f32::ln` / `f32::powf`.
-- `libm`: use the [libm] crate via [num-traits] for `ln` / `powf`.
-  Suitable for bare-metal `no_std` targets.
-
-`first_uniform` dispatches to whichever backend is enabled (preferring
-`pow` if both are enabled). The two underlying functions
-`first_uniform_pow` and `first_uniform_rejection` are always available
-regardless of features, so tests and benchmarks can exercise both.
+- `std` (default): use std's inherent `f32::powf`.
+- `libm`: use the [libm] crate via [num-traits] for `powf`. Suitable for
+  bare-metal `no_std` targets.
 
 All public APIs are `f32`. The library performs no allocation —
 caller-supplied slices throughout — and is suitable for use on Cortex-M4F
@@ -37,179 +92,74 @@ and other single-precision FPU targets. See the *Numerical robustness*
 section below for the precision discussion.
 
 ```toml
-# Default (std + pow):
+# Default (std):
 [dependencies]
 bmpf2 = "0.1"
 
-# no_std with the rejection backend:
+# no_std:
 [dependencies]
-bmpf2 = { version = "0.1", default-features = false, features = ["rejection", "libm"] }
+bmpf2 = { version = "0.1", default-features = false, features = ["libm"] }
 ```
 
 [libm]: https://crates.io/crates/libm
 [num-traits]: https://crates.io/crates/num-traits
 
-## Algorithm: Exp(1)-proposal rejection
-
-For k ≥ 2, the rejection sampler uses an Exp(1) proposal:
-
-```
-draw Y ~ Exp(1)
-if Y ≥ k: reject
-draw V ~ Uniform(0, 1)
-accept iff log V < (k-1)·log(1 - Y/k) + Y - log M_k
-return X = Y / k
-```
-
-where `log M_k = (k-1) · log(1 - 1/k) + 1`. For k = 1, return U directly
-(`Beta(1, 1)` is just Uniform).
-
-## Proof of correctness for the rejection sampler
-
-**Setup.** The target density is `f_k(x) = k · (1 - x)^(k-1)` on
-`[0, 1]` (i.e. `Beta(1, k)`). Apply the change of variables `Y = k · X`,
-so `X = Y/k` and `dY = k · dX`. The density of Y is
-
-```
-f_Y(y) = f_k(y/k) · (1/k) = (1 - y/k)^(k-1)        for y ∈ [0, k].
-```
-
-**Proposal.** We propose Y' ~ Exp(1), with density `g(y) = e^(-y)` on
-`[0, ∞)`. To use rejection sampling, we need a constant `M_k` such that
-`f_Y(y) ≤ M_k · g(y)` for all `y ∈ [0, k]`, i.e.
-
-```
-(1 - y/k)^(k-1) · e^y ≤ M_k                            for all y ∈ [0, k].
-```
-
-**Computing M_k.** Let `h_k(y) = (1 - y/k)^(k-1) · e^y`. Take logs:
-`log h_k(y) = (k-1) · log(1 - y/k) + y`. Differentiate:
-`d/dy log h_k(y) = -(k-1)/(k - y) + 1`. Setting to zero gives `y = 1`.
-Second derivative is `-(k-1)/(k-y)^2 < 0`, so `y = 1` is a maximum.
-Therefore
-
-```
-M_k = h_k(1) = (1 - 1/k)^(k-1) · e          (*)
-```
-
-This M_k is finite for all k ≥ 1 (and approaches 1 as k → ∞). For k = 2,
-`M_2 = (1/2) · e ≈ 1.359`. For k = 10, `M_10 ≈ 1.105`. For large k,
-`M_k → e^(1/k) → 1`.
-
-**Acceptance probability.** Standard rejection sampling: given proposal
-Y, accept with probability
-`A_k(Y) = f_Y(Y) / [M_k · g(Y)] = (1 - Y/k)^(k-1) · e^Y / M_k`. By
-construction (*), `A_k(Y) ≤ 1` for all Y ∈ [0, k]. We perform this
-acceptance test in log space:
-
-```
-log A_k(Y) = (k-1) · log(1 - Y/k) + Y - log M_k
-```
-
-and accept iff `log V < log A_k(Y)` for V ~ Uniform(0, 1) (equivalently,
-iff a fresh uniform is below the true acceptance probability).
-
-**Outside the support.** When Y ≥ k, we reject outright and redraw. This
-is required because the target Y is supported only on [0, k]. The
-probability of this rejection is `Pr[Y ≥ k] = e^(-k)`, which is tiny for
-any practical k.
-
-**Output.** Conditional on acceptance, Y is distributed as `f_Y`, so
-`X = Y/k` is distributed as `f_k = Beta(1, k)`. ∎
-
 ## Performance
 
 **Watch out for autovectorization in microbenchmarks.** A naive benchmark
-loop that accumulates samples will, on x86 with a SIMD libm, let LLVM emit
-vectorized `pow` over runs of consecutive iterations — inflating apparent
-`pow` throughput far above what a Cortex-M can achieve. The shipped
-microbench wraps each call in `std::hint::black_box` to defeat this.
+loop that accumulates samples lets LLVM emit a vectorized `powf` over
+runs of consecutive iterations — measuring batched throughput rather
+than scalar per-call cost. On Cortex-M4F (and any other no-SIMD
+target) batched throughput is unattainable, so the relevant number is
+*scalar* per-call cost. The shipped microbench wraps each call in
+`std::hint::black_box` to defeat the cross-iteration vectorization
+and measure scalar cost.
 
-With `black_box` fences on a modern x86 (f32 path):
+With `black_box` fences on a modern x86, `first_uniform` runs at
+roughly 8.7–9.2 ns/sample across the full `k` range — essentially the
+cost of one scalar `f32::powf` call (on this host's libm). On
+Cortex-M4F, scalar `powf` is typically 100–150 cycles, so expect a
+few times that on the same metric.
+
+## Future work: rational-function squeeze
+
+The library currently uses one `powf` per `first_uniform` call. An
+earlier exploration around a polynomial "squeeze" to skip the
+transcendental on the fast path was buggy (it ignored the M_k
+normalization in the rejection-sampler formulation that was being
+explored at the time, and produced biased samples — empirical mean for
+k=2 came out 0.675 vs. theoretical 0.667). The original ICASSP 2008
+paper's Ziggurat optimization had a similar normalization issue
+(envelope geometry mismatched across n). Neither is retained here.
+
+A more promising and not-yet-implemented direction is a **Padé
+[m/m] rational squeeze** in a rejection scheme. The Padé[1/1] form of
+`(1 − u)^(1/k)` is strikingly clean:
 
 ```
-  k     pow (ns/sample)    rejection (ns/sample)    rej/pow
-  2           9.30                  28.66            3.08x
-  5           9.34                  24.17            2.59x
-  10          9.29                  21.96            2.36x
-  50          9.33                  20.63            2.21x
-  200         9.29                  20.14            2.17x
-  1000        9.24                  20.00            2.16x
+(1 − u)^(1/k)  ≈  (2k − (k+1)u) / (2k − (k−1)u)
 ```
 
-Without `black_box`, SIMD vectorization on the same host reports `pow`
-several times faster than this. That throughput is real for
-vectorizable workloads but is not representative of scalar per-call
-cost on hardware without SIMD.
+so the spacing approximates `u / (k − (k−1)u/2)` (one mult, one
+subtract, one divide; no transcendentals). Used directly as a sampler
+this is biased — error grows large near `u → 1`, which is exactly the
+rare-but-real "large spacing" tail — and the bias compounds in
+`SortedUniforms` over `n = 10⁶` samples. Used as a one-sided **squeeze**
+in a rejection sampler with `powf` on the slow path, the cost
+amortizes: most attempts decide via the cheap rational test, and the
+rare `powf` evaluation is statistically equivalent to no transcendental
+at all for moderate-to-large `k`.
 
-The `pow` path wins on this host. On a Cortex-M4F with a typical
-embedded libm, where scalar `powf` may take 100+ cycles versus a
-`logf` of 30–50 cycles plus an Exp(1) draw, the rejection path may
-win — particularly for moderate to large k where the M_k overhead is
-small. **Benchmark on your actual target before choosing.**
+On host x86, this is unlikely to beat scalar `powf` (a well-tuned
+x86 libm is hard to beat at ~9 ns/call). On Cortex-M4F, where scalar
+`powf` is ~100–150 cycles, an all-multiplies-and-adds fast path
+could plausibly win 30–50%. Whether that's worth the additional
+code complexity (correctness proof for the one-sidedness of the
+bound, careful slow-path correctness) depends on the deployment
+target. Filed as a future direction; happy to revisit if a Cortex-M
+deployment ever materializes that needs it.
 
-## Background: the squeeze that wasn't
-
-Earlier design discussions explored a quadratic squeeze
-`squeeze(Y) = Y² · (k-1) / (2k)` to skip the `log` call on the fast path.
-That construction was wrong: it ignored the M_k normalization and so
-produced biased samples for small k. Empirical mean for k=2 was 0.675 vs.
-theoretical 0.667, clearly detected by the KS test. The shipped library
-drops the squeeze and always evaluates the log-acceptance test; this
-costs one `log` per attempt. The original ICASSP 2008 paper's Ziggurat
-optimization had a similar M-related issue (envelope geometry mismatched
-across n) and is not retained here.
-
-## Linear-time perfect weighted resampling
-
-The crate provides the resampling algorithm that motivated the
-`first_uniform` sampler in the first place.
-
-```rust
-use bmpf2::resample_indices;
-
-let weights = vec![1.0, 3.0, 2.0, 4.0];
-let mut out = vec![0usize; 1000];
-resample_indices(&mut rng, &weights, &mut out);
-// out now contains 1000 indices into `weights`, drawn with probability
-// proportional to weight, sorted ascending.
-```
-
-`resample_indices` runs in O(`weights.len()` + `out.len()`) time. It is
-streaming — one `first_uniform` (and hence one `pow` or one rejection
-attempt) per output index, no scratch buffer. A buffered variant trades
-one extra `n`-element scratch buffer for faster per-element cost (no
-`first_uniform` per element):
-
-```rust
-use bmpf2::resample_indices_buffered;
-
-let weights = vec![1.0, 3.0, 2.0, 4.0];
-let mut out = vec![0usize; 1000];
-let mut scratch = vec![0.0_f32; 1000];   // length must equal out.len()
-resample_indices_buffered(&mut rng, &weights, &mut out, &mut scratch);
-```
-
-On the host x86 with the `pow` backend, `resample_indices_buffered`
-runs at ~12 ns/step against ~15 ns/step for `resample_indices` (~1.30×
-faster). On hardware with a slower `powf` (e.g. Cortex-M4F), the gap
-is expected to widen.
-
-The streaming sorted-uniforms generator is also exposed:
-
-```rust
-use bmpf2::SortedUniforms;
-for u in SortedUniforms::new(&mut rng, 100) {
-    // u_1 ≤ u_2 ≤ ... ≤ u_100, all in [0, 1]
-}
-```
-
-The output indices from both resamplers come out in ascending order,
-which is what most downstream code (e.g. gathering particles into a
-new buffer) wants anyway. If you need them shuffled, do that as a
-post-pass.
-
-### Mathematical correctness
+## Mathematical correctness
 
 This section establishes that `resample_indices` produces a sample with
 exactly the same joint distribution as drawing `n` independent multinomial
@@ -231,11 +181,11 @@ resampling algorithm in this crate combines the Bentley–Saxe sorted
 generator with a standard merge against cumulative weights; the same-pass
 combination was the contribution of Massey (2008). The novelty of the
 present work over the 2008 paper is correctness of the variate
-implementation (the original paper's Ziggurat was buggy; see the
-"squeeze that wasn't" section above) and a careful floating-point
+implementation (the original paper's Ziggurat was buggy; see "Future
+work: rational-function squeeze" above) and a careful floating-point
 boundary argument for the merge.
 
-#### Lemma 1 (memorylessness of uniform order statistics)
+### Lemma 1 (memorylessness of uniform order statistics)
 
 Let `U₁, ..., Uₙ` be i.i.d. Uniform(0, 1) and let
 `U₍₁₎ ≤ U₍₂₎ ≤ ... ≤ U₍ₙ₎` be their order statistics. For any
@@ -249,14 +199,14 @@ continuous distribution; see e.g. Devroye (1986), §V.3, or David & Nagaraja,
 on `U₍ᵢ₎ = u`, the values `Uⱼ` exceeding `u` are i.i.d. Uniform(u, 1)
 by the memoryless construction of order statistics.       ∎
 
-#### Lemma 2 (minimum of k uniforms)
+### Lemma 2 (minimum of k uniforms)
 
 If `V₁, ..., Vₖ` are i.i.d. Uniform(0, 1) then `min(V₁, ..., Vₖ)` has CDF
 `F(v) = 1 − (1 − v)ᵏ` on [0, 1] — i.e., `min(V₁, ..., Vₖ) ~ Beta(1, k)`.
 
 *Proof.* `Pr[min Vᵢ > v] = Pr[V₁ > v] · ... · Pr[Vₖ > v] = (1 − v)ᵏ`.       ∎
 
-#### Theorem 1 (correctness of `SortedUniforms`)
+### Theorem 1 (correctness of `SortedUniforms`)
 
 The iterator `SortedUniforms::new(rng, n)` yields a sequence of values
 distributed as the order statistics of n i.i.d. Uniform(0, 1) variates.
@@ -300,7 +250,7 @@ Therefore `lastᵢ₊₁ = lastᵢ + (1 − lastᵢ) · spacing` has the same
 conditional distribution given `lastᵢ` as `U₍ᵢ₊₁₎` has given `U₍ᵢ₎`,
 and the inductive hypothesis extends to step i + 1.       ∎
 
-#### Theorem 2 (correctness of `resample_indices`)
+### Theorem 2 (correctness of `resample_indices`)
 
 Let `w₁, ..., wₘ ≥ 0` with `T = Σⱼ wⱼ > 0`. Define i.i.d. multinomial
 draws `K₁, ..., Kₙ` with `Pr[Kₐ = j] = wⱼ / T` for j ∈ {1, ..., m}. Then
@@ -349,7 +299,7 @@ j — i.e., on a finite union of points in [0, 1] — which has probability
 zero under the continuous uniform distribution. So `Jᵢ = φ(U₍ᵢ₎)` almost
 surely, and the joint distributions match (∗∗).       ∎
 
-#### Lemma 3 (floating-point boundary)
+### Lemma 3 (floating-point boundary)
 
 Suppose `weights[i]` are finite and nonnegative with positive sum. Then
 `resample_indices` cannot index past `weights.len() − 1` regardless of
@@ -390,29 +340,24 @@ rounds to a representable value `≤ total`). Therefore
 inequality `target > cumulative` is false: the while loop exits with
 `j = m − 1` rather than incrementing further.       ∎
 
-**Edge case.** Both backends return values strictly in `[0, 1)` by
-construction:
+**Edge case.** `first_uniform` returns values strictly in `[0, 1)` by
+construction. It computes `1 − (1 − u)^(1/k)` for
+`u ~ rng.gen::<f32>()` (i.e. `u ∈ [0, 1 − 2⁻²⁴]`). Since `1 − u` lands
+in `[2⁻²⁴, 1]` exactly in f32, `(1 − u)^(1/k) ∈ [2⁻²⁴ᐟᵏ, 1]`, and the
+output is in `[0, 1 − 2⁻²⁴ᐟᵏ] ⊂ [0, 1)`. Each of the 2²⁴ input bins
+maps to a distinct output, all in range — no redraw, no saturation,
+no special case. There is a benign `f32` rounding artifact:
+`(1 − u)^(1/k)` can round to exactly `1` for very large `k` and `u`
+near `0`, making the output `0` and `spacing = 0`; the recurrence
+then yields the prior `last` again — a vanishing statistical artifact
+(the f32 quantization of "consecutive order statistics rounded to the
+same value") and not a Lemma 3 violation since `last ≤ 1` is
+preserved.
 
-- `first_uniform_pow` computes `1 − (1 − u)^(1/k)` for
-  `u ~ rng.gen::<f32>()` (i.e. `u ∈ [0, 1 − 2⁻²⁴]`). Since `1 − u`
-  lands in `[2⁻²⁴, 1]` exactly in f32, `(1 − u)^(1/k) ∈ [2⁻²⁴ᐟᵏ, 1]`,
-  and the output is in `[0, 1 − 2⁻²⁴ᐟᵏ] ⊂ [0, 1)`. Each of the 2²⁴
-  input bins maps to a distinct output, all in range — no redraw,
-  no saturation, no special case. There is a benign `f32` rounding
-  artifact: `(1 − u)^(1/k)` can round to exactly `1` for very large
-  `k` and `u` near `0`, making the output `0` and `spacing = 0`;
-  the recurrence then yields the prior `last` again, which is a
-  vanishing statistical artifact (the f32 quantization of
-  "consecutive order statistics rounded to the same value") and not
-  a Lemma 3 violation since `last ≤ 1` is preserved.
-- The `rejection` backend returns `y/k` with `y > 0` strictly, so its
-  output is in `(0, 1)` exactly.
+So `last` never reaches 1 before the final yield, and the distribution
+of the yielded variates matches Theorem 1 to within `f32` quantization.
 
-In neither backend does `last` reach 1 before the final yield, so
-the distribution of the yielded variates matches Theorem 1 to within
-`f32` quantization.
-
-### Numerical robustness
+## Numerical robustness
 
 The library is `f32` throughout, with `ε = 2⁻²⁴ ≈ 6·10⁻⁸`. Beyond the
 boundary argument, the precision concern is the prefix sums: a naive
@@ -443,7 +388,7 @@ to exactly `1.0` in `f32` (it can, with probability `~3%` at
 `n = 10⁶`, when `E_{n+1}/G` falls below `~2⁻²⁵`). This is a separate
 issue from the Lemma 3 boundary argument and not addressed by Kahan.
 
-### Citations
+## Citations
 
 - Bentley, J. L. & Saxe, J. B. (1980). Generating sorted lists of random
   numbers. *ACM Transactions on Mathematical Software*, 6(3), 359–364.
@@ -464,41 +409,40 @@ issue from the Lemma 3 boundary argument and not addressed by Kahan.
   crate implements; see also the `icassp-ltrs.pdf` companion document
   in this repository's design history.
 
-### Resampling performance
+## Resampling performance
 
-Full-pipeline benchmark (m = n, weights = 1..=m, `f32`, host-specific):
+Full-pipeline benchmark (`m = n`, weights = `1..=m`, `f32`,
+host-specific, all calls `black_box`-fenced):
 
 ```
-    m = n     C ns/call   C ns/step    B ns/call   B ns/step    C/B
-      100         3174       15.87         2425       12.12     1.31x
-     1000        31968       15.98        24453       12.23     1.31x
-    10000       314165       15.71       242873       12.14     1.29x
-   100000      3108815       15.54      2399701       12.00     1.30x
-  1000000     31075298       15.54     23910144       11.96     1.30x
+    m = n     streaming                buffered              streaming
+              ns/call    ns/step       ns/call    ns/step    /buffered
+      100         2938     14.69          2294     11.47        1.28x
+     1000        29668     14.83         23149     11.57        1.28x
+    10000       293323     14.67        230499     11.52        1.27x
+   100000      2918029     14.59       2275946     11.38        1.28x
+  1000000     29067435     14.53      22662423     11.33        1.28x
 ```
 
-C = `resample_indices` (streaming Method C, no scratch). B =
-`resample_indices_buffered` (Method B, requires `n`-element scratch).
-Linear scaling is clean across five orders of magnitude. The per-step
-cost is dominated by the Beta(k, 1) draw (Method C) or the Exp(1) draw
-plus the merge (Method B); cache effects don't materially degrade
-large-m performance because the weight array is touched in a single
-forward sweep.
+Linear scaling is clean across five orders of magnitude. Per-step
+cost is dominated by the `Beta(1, k)` draw (streaming) or the
+`Exp(1)` draw plus merge (buffered); cache effects don't materially
+degrade large-`m` performance because the weight array is touched in
+a single forward sweep.
 
-The C/B ratio of ~1.3× on this host (modern x86 with SIMD libm)
-narrows because vectorized `pow` is fast here. On Cortex-M4F with no
-SIMD and a slower scalar `powf`, Method B is expected to win by a
-larger margin.
+The ~1.28× ratio on this host reflects the per-call cost difference
+between scalar `powf` and an `Exp(1)` Ziggurat draw on a well-tuned
+x86 libm. On Cortex-M4F, where scalar `powf` is much slower
+(~100–150 cycles vs ~30–60 for `Exp(1)` Ziggurat), the buffered
+variant is expected to win by a larger margin.
 
 ## Files
 
 - `src/lib.rs` — top-level docs, re-exports, feature compile-errors.
-- `src/first_uniform.rs` — `first_uniform` dispatcher and the two
-  named-backend variants `first_uniform_pow` / `first_uniform_rejection`.
+- `src/first_uniform.rs` — the [`first_uniform`] sampler.
 - `src/sorted_uniforms.rs` — `SortedUniforms` iterator.
-- `src/resample.rs` — `resample_indices` (Method C) and
-  `resample_indices_buffered` (Method B), plus the private Kahan-add
-  helper.
+- `src/resample.rs` — `resample_indices` and
+  `resample_indices_buffered`, plus the private Kahan-add helper.
 - `src/bin/tests.rs` — statistical correctness driver and microbench
   (run via `cargo run --bin tests`; intentionally not on the
   `cargo test` path because the tests are tolerance-based, not crisp
@@ -508,17 +452,13 @@ larger margin.
 ## Building
 
 ```
-# Default (std + pow):
+# Default (std):
 cargo run --release --bin tests
 
-# std + rejection:
-cargo run --release --bin tests --no-default-features --features std,rejection
-
-# no_std smoke tests (lib only — bin is gated to std):
-cargo build --release --no-default-features --features libm,pow
-cargo build --release --no-default-features --features libm,rejection
+# no_std smoke test (lib only — bin is gated to std):
+cargo build --release --no-default-features --features libm
 ```
 
 For genuine `no_std` verification, build against an embedded target,
-e.g.: `cargo build --release --no-default-features --features libm,pow
+e.g.: `cargo build --release --no-default-features --features libm
 --target thumbv7em-none-eabihf`.

@@ -1,24 +1,31 @@
 //! Linear-time perfect weighted resampling (Sequential Importance
-//! Resampling).
+//! Resampling with replacement, a.k.a. multinomial resampling).
 //!
 //! Given a vector of `m` weights (need not be normalized) and an
-//! output count `n`, produce `n` indices drawn iid with probability
-//! proportional to the weights. Statistically equivalent to
-//! independent multinomial draws, but runs in O(m + n) time using
-//! the merge-with-sorted-uniforms trick of Massey 2008.
+//! output count `n`, produce `n` indices drawn iid (with replacement)
+//! with probability proportional to the weights. Output is
+//! statistically equivalent to a multinomial draw of length `n` on
+//! the weight distribution, but runs in O(m + n) time using the
+//! merge-with-sorted-uniforms construction of Massey 2008.
 //!
-//! Two implementations:
+//! Two variants:
 //!
-//! - [`resample_indices`] (Method C): streaming, no scratch buffer,
-//!   one [`crate::first_uniform`] call per output index.
-//! - [`resample_indices_buffered`] (Method B): caller supplies an
-//!   `n`-element scratch buffer, faster per-element on hardware with
-//!   slow `powf`. Same statistical contract.
+//! - [`resample_indices`] — **streaming**. No extra memory beyond
+//!   the output slice. Calls [`crate::first_uniform`] (one `powf`)
+//!   per output index.
+//! - [`resample_indices_buffered`] — **buffered**. Caller supplies
+//!   an `n`-element scratch buffer; in exchange, the per-element
+//!   cost drops because it generates sorted uniforms via Gamma
+//!   ratios (Exp(1) draws) instead of `powf`. Typically ~1.3×
+//!   faster on x86; more on hardware with a slow `powf`.
+//!
+//! Both produce the same statistical output (multinomial-distributed
+//! indices in ascending order). Pick whichever fits your memory
+//! budget.
 //!
 //! Numerical robustness: every multi-term accumulator on the data
 //! path uses Kahan compensated summation, so the per-accumulator
-//! error is `O(ε)` rather than `O(n · ε)`. The Kahan helper is
-//! [`kahan_add`] (private to this module).
+//! error is `O(ε)` rather than `O(n · ε)`.
 
 use rand::Rng;
 use rand_distr::{Distribution, Exp1};
@@ -35,13 +42,16 @@ fn kahan_add(sum: &mut f32, c: &mut f32, x: f32) {
 }
 
 /// Resample `out.len()` indices from `weights`, with each index drawn
-/// independently with probability proportional to its weight.
+/// iid (i.e. with replacement) with probability proportional to its
+/// weight. Output is statistically equivalent to a multinomial draw
+/// of length `out.len()` on the weight distribution — i.e. this is
+/// "multinomial resampling".
 ///
-/// Method C: streaming. Runs in O(`weights.len()` + `out.len()`)
-/// time, allocates nothing, and uses one [`crate::first_uniform`]
-/// call per output index. The resulting indices are in ascending
-/// order (because the underlying sorted-uniforms generator is);
-/// callers who need them shuffled should permute `out` afterward.
+/// Streaming: runs in O(`weights.len()` + `out.len()`) time,
+/// allocates nothing, and uses one [`crate::first_uniform`] call
+/// (one `powf`) per output index. The resulting indices are in
+/// ascending order; callers who need them shuffled should permute
+/// `out` afterward.
 ///
 /// # Preconditions
 /// - `weights` is nonempty.
@@ -52,9 +62,10 @@ fn kahan_add(sum: &mut f32, c: &mut f32, x: f32) {
 /// undefined (but memory-safe) output in release.
 ///
 /// # See also
-/// [`resample_indices_buffered`] — same statistical contract, faster
-/// per element on hardware with a slow `pow`, but requires an extra
-/// scratch buffer of length `n`.
+/// [`resample_indices_buffered`] — same statistical contract,
+/// typically ~1.3× faster on x86 (more on hardware with a slow
+/// `powf`), but requires a caller-supplied scratch buffer of length
+/// `out.len()`.
 ///
 /// # Panics
 /// Panics in debug if preconditions are violated. Always panics if
@@ -73,10 +84,7 @@ pub fn resample_indices<R: Rng + ?Sized>(rng: &mut R, weights: &[f32], out: &mut
     let mut total = 0.0_f32;
     let mut total_c = 0.0_f32;
     for &w in weights {
-        debug_assert!(
-            w.is_finite() && w >= 0.0,
-            "weight must be finite and ≥ 0"
-        );
+        debug_assert!(w.is_finite() && w >= 0.0, "weight must be finite and ≥ 0");
         kahan_add(&mut total, &mut total_c, w);
     }
     debug_assert!(total > 0.0, "total weight must be strictly positive");
@@ -104,33 +112,33 @@ pub fn resample_indices<R: Rng + ?Sized>(rng: &mut R, weights: &[f32], out: &mut
     }
 }
 
-/// Buffered weighted resampler ("Method B"): same statistical
-/// contract as [`resample_indices`], faster on hardware with a slow
-/// `pow`, but requires a caller-supplied scratch buffer of length
-/// `out.len()`.
+/// Buffered weighted resampler: same statistical contract as
+/// [`resample_indices`], typically ~1.3× faster on x86 (more on
+/// hardware with a slow `powf`), but requires a caller-supplied
+/// scratch buffer of length `out.len()`.
 ///
 /// # Algorithm
 /// Draw `n + 1` Exp(1) variates `E_1, …, E_{n+1}`. Let
 /// `G = E_1 + … + E_{n+1}` and `S_i = E_1 + … + E_i`. Then
 /// `U_(i) = S_i / G` for `i = 1, …, n` are exactly the order
 /// statistics of `n` iid Uniform(0, 1) draws (a standard result on
-/// Gamma / Beta distribution ratios). The algorithm fills `scratch`
+/// Gamma / Beta distribution ratios). The function fills `scratch`
 /// with the first `n` Exp draws, accumulates `G` (with the (n+1)-th
 /// draw added but not stored), then walks `scratch` left-to-right
 /// computing `S_i / G` and merging against the cumulative weight
-/// vector. Note that this method does *not* go through
+/// vector. Note that this routine does *not* go through
 /// [`crate::first_uniform`] or [`crate::SortedUniforms`].
 ///
-/// Compared to [`resample_indices`] (streaming "Method C"):
+/// Compared to [`resample_indices`]:
 ///
-/// - **No `pow` per element.** Method C calls
-///   [`crate::first_uniform`] once per output index; the `pow`
-///   backend dominates per-call cost. Method B replaces this with an
-///   Exp(1) draw plus a multiplication by `1/G` — typically several
-///   times faster on hardware without a fast vectorized `powf`.
+/// - **No `powf` per element.** [`resample_indices`] calls
+///   [`crate::first_uniform`] once per output index; the scalar
+///   `powf` dominates per-call cost. The buffered variant replaces
+///   this with an Exp(1) draw (Ziggurat, no transcendental on the
+///   fast path) plus a multiplication by `1/G`.
 /// - **Needs scratch.** Caller supplies `&mut [f32]` of length
 ///   `out.len()`. On 32-bit MCU this costs `4n` extra bytes.
-/// - **Same statistical contract.** Both methods produce indices
+/// - **Same statistical output.** Both methods produce indices
 ///   distributed as iid multinomial draws on `weights`, in ascending
 ///   order.
 ///
@@ -181,10 +189,7 @@ pub fn resample_indices_buffered<R: Rng + ?Sized>(
     let mut total = 0.0_f32;
     let mut total_c = 0.0_f32;
     for &w in weights {
-        debug_assert!(
-            w.is_finite() && w >= 0.0,
-            "weight must be finite and ≥ 0"
-        );
+        debug_assert!(w.is_finite() && w >= 0.0, "weight must be finite and ≥ 0");
         kahan_add(&mut total, &mut total_c, w);
     }
     debug_assert!(total > 0.0, "total weight must be strictly positive");

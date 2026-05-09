@@ -4,25 +4,18 @@ version = "0.1.0"
 edition = "2021"
 
 [features]
-# Default: std + the `pow` backend. Suitable for hosted desktop use.
-default = ["pow", "std"]
+# Default: std. Library uses `f32::powf` (in `first_uniform`) and
+# `Exp1` Ziggurat sampling (in `resample_indices_buffered`); both need
+# either std or libm to provide the underlying math routines.
+default = ["std"]
 
-# Sampler backend selection. Exactly one should be active. With both,
-# `pow` wins; with neither, the crate fails to compile.
-#
-# `pow`: direct `u.powf(1/k)`. Fast on hardware with a fast libm pow.
-pow = []
-# `rejection`: Exp(1) rejection sampling. May win on hardware with slow
-# pow but adequate log/exp; verify on target before relying on this.
-rejection = []
-
-# `std`: pulls in std's libm bindings via num-traits, plus rand's stdlib
-# integration (StdRng, Standard distribution etc.). Required to build
-# the `tests` binary.
+# `std`: pulls in std's libm bindings via num-traits, plus rand's
+# stdlib integration (StdRng, Standard distribution etc.). Required to
+# build the `tests` binary.
 std = ["num-traits/std", "rand/std", "rand/std_rng", "rand_distr/std"]
 
-# `libm`: routes transcendental math (`ln`, `powf`) through the `libm`
-# crate via `num-traits`. Use this in `no_std` builds: enable exactly
+# `libm`: routes transcendental math (`powf`, etc.) through the `libm`
+# crate via `num-traits`. Use this in `no_std` builds; enable exactly
 # one of `std` or `libm`.
 libm = ["num-traits/libm"]
 

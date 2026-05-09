@@ -7,15 +7,19 @@ use rand::Rng;
 
 use crate::first_uniform::first_uniform;
 
-/// Streaming iterator yielding `n` uniform variates in ascending order.
+/// Streaming iterator yielding `n` uniform variates in ascending order
+/// in O(n) time.
 ///
-/// The values are distributed as the order statistics of `n` iid
-/// Uniform(0, 1) draws. Internally uses the spacings recurrence: at
-/// step `i` (with `last = U_(i-1)`), the next variate is
-/// `last + (1 − last) · spacing`, where `spacing` is the minimum of
-/// `k` iid Uniform(0, 1) draws and `k = n − i + 1` is the number of
-/// remaining draws. The spacing is provided by
-/// [`crate::first_uniform`].
+/// The yielded values are distributed exactly as the order statistics
+/// of `n` iid Uniform(0, 1) draws — i.e. the same as drawing `n` iid
+/// uniforms and sorting them, but produced one at a time without a
+/// sort.
+///
+/// Internally uses the *spacings recurrence*: at each step, the next
+/// variate is computed as `last + (1 − last) · spacing`, where
+/// `spacing` is the minimum of the remaining iid uniform draws (a
+/// `Beta(1, k)` variate, supplied by [`crate::first_uniform`]). See
+/// the README's "Mathematical correctness" section for the proof.
 ///
 /// Holds a mutable reference to the RNG. Yields exactly `n` values,
 /// then `None` thereafter.
