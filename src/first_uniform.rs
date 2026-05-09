@@ -5,7 +5,7 @@
 //! Two implementations are provided, exposed unconditionally so callers
 //! can compare or force a specific one:
 //!
-//! - [`first_uniform_pow`]: direct inverse-CDF, `1 − u^(1/k)`.
+//! - [`first_uniform_pow`]: direct inverse-CDF, `1 − (1 − u)^(1/k)`.
 //! - [`first_uniform_rejection`]: Exp(1)-proposal rejection sampler.
 //!
 //! The dispatcher [`first_uniform`] selects between them based on the
@@ -47,33 +47,32 @@ pub fn first_uniform<R: Rng + ?Sized>(rng: &mut R, k: u32) -> f32 {
 }
 
 /// Direct inverse-CDF sampler for the min of `k` iid Uniform(0, 1):
-/// returns `1 − u^(1/k)` for `u ~ Uniform(0, 1)`.
+/// returns `1 − (1 − u)^(1/k)` for `u ~ Uniform(0, 1)`.
 ///
 /// Always available, regardless of feature flags, so it can be used
 /// directly when a caller wants to force the pow backend or compare
 /// against [`first_uniform_rejection`].
 ///
-/// To eliminate the (rare) edge case where `u` is sampled as exactly
-/// 0 — which would yield `1 − 0^(1/k) = 1` and freeze the
-/// order-statistic recurrence at `last = 1` — this function redraws
-/// if `u == 0`. The probability of a redraw is `~2⁻²³` per call.
+/// The form `1 − (1 − u)^(1/k)` is the inverse CDF of Beta(1, k)
+/// applied directly. The algebraically equivalent
+/// `1 − u^(1/k)` (using the substitution `v = 1 − u`, also uniform)
+/// would yield exactly `1` when `u` rounds to `0` in f32 — outside
+/// the `[0, 1)` support — so it would need a redraw or saturation
+/// guard. The form used here is well-behaved across the entire f32
+/// `rng.gen` range without any special case: each of the 2²⁴ input
+/// bins maps to a distinct output in `[0, 1)`.
 ///
 /// # Panics
 /// Panics if `k == 0`.
 pub fn first_uniform_pow<R: Rng + ?Sized>(rng: &mut R, k: u32) -> f32 {
     assert!(k >= 1, "k must be at least 1");
-    let u: f32 = loop {
-        let candidate: f32 = rng.gen();
-        if candidate != 0.0 {
-            break candidate;
-        }
-    };
+    let u: f32 = rng.gen();
     if k == 1 {
-        // Beta(1, 1) is just Uniform(0, 1); 1 − u is also Uniform(0, 1),
-        // but returning u keeps one f32 op fewer.
+        // Beta(1, 1) is Uniform(0, 1); rng.gen already returns that.
+        // Equivalent to `1 − (1 − u)^1 = u`.
         u
     } else {
-        1.0 - u.powf(1.0 / k as f32)
+        1.0 - (1.0 - u).powf(1.0 / k as f32)
     }
 }
 

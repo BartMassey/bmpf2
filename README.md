@@ -390,26 +390,27 @@ rounds to a representable value `≤ total`). Therefore
 inequality `target > cumulative` is false: the while loop exits with
 `j = m − 1` rather than incrementing further.       ∎
 
-**Edge case.** Both backends return values strictly in `[0, 1)` for
-practical purposes:
+**Edge case.** Both backends return values strictly in `[0, 1)` by
+construction:
 
-- `first_uniform_pow` returns `1 − u^(1/k)` and redraws if the
-  underlying uniform `u` is exactly 0 (probability ~2⁻²³ per call in
-  `f32`). The redraw guards against returning exactly 1, which would
-  set `spacing = 1` and freeze `last` at 1 thereafter. There is a
-  separate `f32` quantization issue going the other way:
-  `u.powf(1/k)` can round to exactly `1.0` when `u` is close to 1
-  (probability `~2⁻²⁴` per call), making `1 − u^(1/k) = 0` and
-  `spacing = 0`; the recurrence then yields the prior `last` again
-  — a vanishing statistical artifact (one repeated value out of
-  `~2²⁴`), and not a Lemma 3 violation since `last ≤ 1` is
-  preserved.
+- `first_uniform_pow` computes `1 − (1 − u)^(1/k)` for
+  `u ~ rng.gen::<f32>()` (i.e. `u ∈ [0, 1 − 2⁻²⁴]`). Since `1 − u`
+  lands in `[2⁻²⁴, 1]` exactly in f32, `(1 − u)^(1/k) ∈ [2⁻²⁴ᐟᵏ, 1]`,
+  and the output is in `[0, 1 − 2⁻²⁴ᐟᵏ] ⊂ [0, 1)`. Each of the 2²⁴
+  input bins maps to a distinct output, all in range — no redraw,
+  no saturation, no special case. There is a benign `f32` rounding
+  artifact: `(1 − u)^(1/k)` can round to exactly `1` for very large
+  `k` and `u` near `0`, making the output `0` and `spacing = 0`;
+  the recurrence then yields the prior `last` again, which is a
+  vanishing statistical artifact (the f32 quantization of
+  "consecutive order statistics rounded to the same value") and not
+  a Lemma 3 violation since `last ≤ 1` is preserved.
 - The `rejection` backend returns `y/k` with `y > 0` strictly, so its
   output is in `(0, 1)` exactly.
 
-In neither backend does `last` reach 1 (and stick) before the final
-yield, so the distribution of the yielded variates matches Theorem 1
-to within `f32` quantization.
+In neither backend does `last` reach 1 before the final yield, so
+the distribution of the yielded variates matches Theorem 1 to within
+`f32` quantization.
 
 ### Numerical robustness
 
