@@ -2,6 +2,18 @@
 name = "ltsis"
 version = "0.1.0"
 edition = "2021"
+authors = [
+    "Bart Massey <bart.massey@gmail.com>",
+    "Claude <noreply@anthropic.com>",
+]
+description = "Linear-time perfect weighted resampling for sequential importance sampling with replacement"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/BartMassey/ltsis"
+documentation = "https://docs.rs/ltsis"
+readme = "README.md"
+keywords = ["sampling", "resampling", "monte-carlo", "statistics", "no-std"]
+categories = ["mathematics", "no-std", "algorithms"]
+exclude = ["HANDOFF.md"]
 
 [features]
 # Default: std. Library uses `f32::powf` (in `first_uniform`) and
