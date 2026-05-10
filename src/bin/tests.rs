@@ -1,4 +1,4 @@
-//! Statistical correctness driver and benchmark for `bmpf2`.
+//! Statistical correctness driver and benchmark for `ltsis`.
 //!
 //! The tests here are statistical (KS distance, chi-squared
 //! goodness-of-fit, moment matching). They use fixed RNG seeds and
@@ -17,7 +17,7 @@
 //! `std::hint::black_box` fences at every iteration boundary to
 //! prevent LLVM from fusing or vectorizing across calls.
 
-use bmpf2::{first_uniform, resample_indices, resample_indices_buffered, SortedUniforms};
+use ltsis::{first_uniform, resample_indices, resample_indices_buffered, SortedUniforms};
 use rand::rngs::StdRng;
 use rand::Rng;
 use rand::SeedableRng;
@@ -27,7 +27,7 @@ use std::time::Instant;
 const KS_CRITICAL_001: f64 = 1.949; // 0.1% significance critical-value coefficient
 
 fn main() {
-    println!("=== bmpf2 statistical test driver ===\n");
+    println!("=== ltsis statistical test driver ===\n");
 
     let mut all_passed = true;
 

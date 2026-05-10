@@ -1,5 +1,5 @@
 [package]
-name = "bmpf2"
+name = "ltsis"
 version = "0.1.0"
 edition = "2021"
 
@@ -32,5 +32,5 @@ path = "src/bin/tests.rs"
 required-features = ["std"]
 
 [lib]
-name = "bmpf2"
+name = "ltsis"
 path = "src/lib.rs"

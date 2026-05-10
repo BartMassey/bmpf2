@@ -1,4 +1,4 @@
-# `bmpf2` — Sequential Importance Resampling primitives
+# `ltsis` — Sequential Importance Resampling primitives
 
 A Rust library for **Sequential Importance Resampling (SIR) with
 replacement** — also known as **multinomial resampling** — the
@@ -12,7 +12,7 @@ weight, in O(n) time. Implements the algorithm of Massey
 ## Quick start
 
 ```rust
-use bmpf2::resample_indices;
+use ltsis::resample_indices;
 use rand::SeedableRng;
 
 let mut rng = rand::rngs::StdRng::seed_from_u64(42);
@@ -106,11 +106,11 @@ section below for the precision discussion.
 ```toml
 # Default (std):
 [dependencies]
-bmpf2 = "0.1"
+ltsis = "0.1"
 
 # no_std:
 [dependencies]
-bmpf2 = { version = "0.1", default-features = false, features = ["libm"] }
+ltsis = { version = "0.1", default-features = false, features = ["libm"] }
 ```
 
 [libm]: https://crates.io/crates/libm
