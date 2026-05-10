@@ -1,6 +1,5 @@
-//! Sample the minimum of `k` iid Uniform(0, 1) draws — i.e. the
-//! distribution of the *first* (smallest) of `k` uniform variates.
-//! Equivalently, `Beta(1, k)` in the standard parametrization.
+//! Sample the minimum of `k` iid Uniform(0, 1) draws — equivalently,
+//! `Beta(1, k)`. Used internally by [`crate::SortedUniforms`].
 
 // In no_std mode, `f32::powf` is not an inherent method; we reach it
 // through the `num_traits::Float` trait, which under the `libm`
@@ -14,14 +13,8 @@ use rand::Rng;
 /// Draw a sample distributed as the minimum of `k` iid Uniform(0, 1)
 /// variates (equivalently, `Beta(1, k)` in standard notation).
 ///
-/// This is the per-step primitive driving the order-statistic
-/// recurrence in [`crate::SortedUniforms`].
-///
-/// Computed via the inverse CDF: `1 − (1 − u)^(1/k)` for
-/// `u ~ Uniform(0, 1)`. The form `1 − (1 − u)^(1/k)` (rather than the
-/// algebraically equivalent `1 − u^(1/k)`) is well-behaved across the
-/// entire f32 `rng.gen` range without any special case: each of the
-/// 2²⁴ input bins maps to a distinct output in `[0, 1)`.
+/// The per-step primitive driving the order-statistic recurrence in
+/// [`crate::SortedUniforms`]. Most callers won't need this directly.
 ///
 /// # Panics
 /// Panics if `k == 0`.
@@ -33,6 +26,11 @@ pub fn first_uniform<R: Rng + ?Sized>(rng: &mut R, k: u32) -> f32 {
         // Equivalent to `1 − (1 − u)^1 = u`.
         u
     } else {
+        // Inverse CDF of Beta(1, k). The form `1 − (1 − u)^(1/k)`
+        // (rather than the algebraically-equivalent `1 − u^(1/k)`) is
+        // well-behaved across the entire f32 `rng.gen` range — each
+        // of the 2²⁴ input bins maps to a distinct output in [0, 1)
+        // with no special-case redraw needed. See INTERNALS.md §4.1.
         1.0 - (1.0 - u).powf(1.0 / k as f32)
     }
 }

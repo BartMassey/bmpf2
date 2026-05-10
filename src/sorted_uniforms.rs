@@ -1,5 +1,5 @@
 //! Streaming iterator yielding `n` Uniform(0, 1) variates in
-//! ascending order in O(n) time, via the order-statistic recurrence.
+//! ascending order in O(n) time.
 
 use core::iter::FusedIterator;
 
@@ -7,22 +7,19 @@ use rand::Rng;
 
 use crate::first_uniform::first_uniform;
 
-/// Streaming iterator yielding `n` uniform variates in ascending order
-/// in O(n) time.
+/// Streaming iterator yielding `n` Uniform(0, 1) variates in ascending
+/// order in O(n) time.
 ///
 /// The yielded values are distributed exactly as the order statistics
 /// of `n` iid Uniform(0, 1) draws — i.e. the same as drawing `n` iid
 /// uniforms and sorting them, but produced one at a time without a
 /// sort.
 ///
-/// Internally uses the *spacings recurrence*: at each step, the next
-/// variate is computed as `last + (1 − last) · spacing`, where
-/// `spacing` is the minimum of the remaining iid uniform draws (a
-/// `Beta(1, k)` variate, supplied by [`crate::first_uniform`]). See
-/// the README's "Mathematical correctness" section for the proof.
-///
 /// Holds a mutable reference to the RNG. Yields exactly `n` values,
 /// then `None` thereafter.
+///
+/// See `INTERNALS.md` §3.1 / §5.1 for the spacings-recurrence
+/// algorithm and its correctness proof.
 pub struct SortedUniforms<'a, R: Rng + ?Sized> {
     rng: &'a mut R,
     remaining: u32,
@@ -48,6 +45,10 @@ impl<'a, R: Rng + ?Sized> Iterator for SortedUniforms<'a, R> {
         if self.remaining == 0 {
             return None;
         }
+        // Spacings recurrence: U_(i) = U_(i-1) + (1 - U_(i-1)) * Z,
+        // where Z is the minimum of the `remaining` uniforms still
+        // to come — distributed as Beta(1, remaining), supplied by
+        // first_uniform.
         let spacing = first_uniform(self.rng, self.remaining);
         self.last = self.last + (1.0 - self.last) * spacing;
         self.remaining -= 1;
