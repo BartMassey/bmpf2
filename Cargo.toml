@@ -22,8 +22,8 @@ exclude = ["HANDOFF.md"]
 default = ["std"]
 
 # `std`: pulls in std's libm bindings via num-traits, plus rand's
-# stdlib integration (StdRng, Standard distribution etc.). Required to
-# build the `tests` binary.
+# stdlib integration (StdRng, Standard distribution etc.). Also
+# required by the integration tests and benchmark harness.
 std = ["num-traits/std", "rand/std", "rand/std_rng", "rand_distr/std"]
 
 # `libm`: routes transcendental math (`powf`, etc.) through the `libm`
@@ -36,12 +36,12 @@ num-traits = { version = "0.2", default-features = false }
 rand = { version = "0.8", default-features = false }
 rand_distr = { version = "0.4", default-features = false }
 
-[[bin]]
-name = "tests"
-path = "src/bin/tests.rs"
-# The driver uses Vec, Instant, println!, StdRng — std-only. Hide it
-# from no_std builds so they don't try (and fail) to compile it.
-required-features = ["std"]
+# Microbenchmark with a hand-rolled `fn main()` and our own timing
+# (`harness = false` disables the unstable `#[bench]` harness). Run
+# with `cargo bench`.
+[[bench]]
+name = "bench"
+harness = false
 
 [lib]
 name = "ltsis"

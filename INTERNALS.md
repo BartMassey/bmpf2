@@ -437,43 +437,54 @@ preserved.
 
 ### 5.4. Statistical test methodology
 
-The shipped test driver (`src/bin/tests.rs`, run via
-`cargo run --bin tests`) checks:
+The integration tests in `tests/statistical.rs` (run via
+`cargo test`) check the following invariants. All RNG seeds are
+fixed; thresholds are calibrated to keep the **aggregate
+random-failure probability under correct code below 1e-9** (the
+ten tests share an aggregate budget of `1e-9`, so each test
+reserves `~1e-10` and each sub-check inside a test reserves
+`~1e-11` after Bonferroni correction over its sub-checks).
 
-1. **Range check**: every sample in `[0, 1)` for `first_uniform`
-   across `k ∈ {1, 2, 3, 5, 10, 100, 1000}`, 100k samples each.
-2. **Empirical moments**: mean and variance of `first_uniform(k)`
-   match the closed-form Beta(1, k) values to within 5σ
-   (mean) / 2% relative (variance), 1M samples each.
-3. **One-sample KS**: empirical CDF of `first_uniform` samples
-   vs. analytic `Fₖ(x) = 1 − (1 − x)ᵏ`, 50k samples each, 0.1%
-   significance.
-4. **Two-sample KS**: `first_uniform` vs. an independent
-   min-of-k-uniforms oracle (literally `min(rng.gen::<f32>(), ...)`
-   over k draws), 20k samples each, 0.1% significance.
-5. **`SortedUniforms` per-position moments**: empirical mean and
-   variance at each position match the closed-form order-statistic
-   values, 200k runs.
-6. **`SortedUniforms` pooled KS**: pooled output vs. uniform CDF.
-7. **Resampling marginal chi-squared**: per-index frequency under
-   each resampler matches the weight-proportional probabilities,
-   four weight cases (uniform, decreasing, peaky, with-zeros),
-   chi-squared at 0.1%.
-8. **Resampling vs. naive multinomial chi-squared**: two-sample
-   chi-squared on index-count vectors comparing each resampler
-   against an O(m + n log m) inverse-CDF naive multinomial
-   reference (run in f64 internally so the reference has no
-   prefix-sum noise of its own).
+1. **Range check** (`range`, deterministic): every `first_uniform`
+   sample lies in `[0, 1)` across `k ∈ {1, 2, 3, 5, 10, 100, 1000}`,
+   100k samples each.
+2. **Empirical moments** (`moments_first_uniform`): mean and
+   variance of `first_uniform(k)` match the closed-form Beta(1, k)
+   values across `k ∈ {1, 2, 3, 5, 10, 50, 200}`, 1M samples each.
+   Mean tolerance 7σ; variance tolerance 2% relative (≈ 14σ at
+   1M samples).
+3. **One-sample KS** (`ks_against_theory`): empirical CDF of
+   `first_uniform` samples vs. analytic `Fₖ(x) = 1 − (1 − x)ᵏ`,
+   50k samples each. Critical-value coefficient `c = 3.7`
+   (≈ `2·exp(−2c²) ≈ 2.5e-12` per sub-check).
+4. **Two-sample KS** (`ks_against_min_oracle`): `first_uniform`
+   vs. an independent min-of-k-uniforms oracle (literally
+   `min(rng.gen::<f32>(), ...)` over `k` draws), 20k samples each,
+   `c = 3.7`.
+5. **Sorted-uniforms per-position moments** (`sorted_uniforms_moments`):
+   empirical mean and variance at each position match the closed-form
+   order-statistic values, 200k runs. Per-position mean tolerance
+   `7.5σ` (covers `n` up to 100 positions per test).
+6. **Pooled sorted-uniforms KS** (`sorted_uniforms_pooled_ks`):
+   pooled output vs. uniform CDF, `c = 3.7`.
+7. **Resampler marginal χ²** (`resample_marginals_streaming` and
+   `resample_marginals_buffered`): per-index frequency under each
+   resampler matches the weight-proportional probabilities, four
+   weight cases (uniform, decreasing, peaky, with-zeros).
+   Wilson–Hilferty z = 7.0.
+8. **Resampler vs. naive multinomial χ²**
+   (`resample_vs_multinomial_streaming` and
+   `resample_vs_multinomial_buffered`): two-sample chi-squared on
+   index-count vectors comparing each resampler against an
+   O(m + n log m) inverse-CDF naive multinomial reference (run in
+   f64 internally so the reference has no prefix-sum noise of its
+   own). Wilson–Hilferty z = 7.0.
 
-All tests use fixed RNG seeds and pass deterministically with the
-current `rand` version. They are explicitly *not* on the
-`cargo test` path (planned future-work item — see §7) because a
-`rand` minor bump can shift the underlying RNG sequence and trip a
-threshold on otherwise-correct code, and that's the wrong kind of
-CI failure. Once thresholds are recalibrated to give each test a
-random-failure probability below `1e-9` (currently each is at the
-0.1% level pinned only by seed), the tests can move into `tests/`
-under standard `cargo test`.
+The 1e-9 budget is per-fixed-`rand`-version; if `rand` bumps the
+algorithm of any of its samplers, the seeds will produce different
+sequences and the budget would have to be re-verified. `Cargo.lock`
+is committed precisely to pin the `rand` version against this risk
+in CI / development.
 
 ### 5.5. Microbenchmark methodology
 
@@ -575,30 +586,16 @@ plausibly win 30–50%. Whether that's worth the complexity
 (correctness proof for one-sidedness, careful slow-path semantics)
 depends on the deployment target.
 
-### 7.2. Statistical tests under `cargo test`
-
-Move the contents of `src/bin/tests.rs` into `tests/` so they run
-under `cargo test` and integrate with CI. Iteration counts must be
-tuned so each test's expected false-failure probability under
-correct code is below `1e-9` (currently each is at the 0.1% level
-pinned only by fixed seeds).
-
-### 7.3. Microbenchmark under `benches/`
-
-Split the microbench out of the test driver into a `benches/`
-binary (or a proper `criterion` setup if we want statistical
-treatment of measurement variance).
-
-### 7.4. CI
+### 7.2. CI
 
 Add a GitHub Actions workflow covering:
 - Both feature configurations (`default` = `std`, `--no-default-features --features libm`).
 - `cargo fmt --check`.
-- `cargo clippy` (deny warnings).
+- `cargo clippy --all-targets` (deny warnings).
 - `cargo test`.
 - `cargo doc --no-deps`.
 
-### 7.5. Bayesian particle filter API
+### 7.3. Bayesian particle filter API
 
 A higher-level API on top of the resampling primitives, building
 toward a complete particle-filter library. Deferred indefinitely;

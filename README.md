@@ -121,22 +121,33 @@ larger margin than on x86 because scalar `powf` is much more
 expensive than the Exp(1) Ziggurat there. See `INTERNALS.md` for
 methodology, full bench tables, and Cortex-M expectations.
 
-## Testing & validation
+## Testing & benchmarking
 
-Run the statistical correctness driver:
+Integration tests:
 
 ```
-cargo run --release --bin tests
+cargo test --release
 ```
 
-This exercises `first_uniform`, `SortedUniforms`, and both
-resamplers against analytic CDFs, moment formulae, and an
-independent oracle, using KS and chi-squared tests at the 0.1%
-significance level. The driver is intentionally not on the
-`cargo test` path (yet) because tolerance-based statistical tests
-can flake on RNG version bumps; see `INTERNALS.md` §7.2 for the
-plan to migrate to `cargo test` with calibrated <1e-9 random-
-failure probability.
+Ten statistical tests checking `first_uniform`, `SortedUniforms`,
+and both resamplers against analytic CDFs, moment formulae, and an
+independent oracle, using one-sample KS, two-sample KS, and chi-
+squared statistics. Thresholds are calibrated so the aggregate
+random-failure probability under correct code is **< 1e-9** (RNG
+seeds fixed); methodology and threshold derivations are in
+`INTERNALS.md` §5.4.
+
+Microbenchmark:
+
+```
+cargo bench
+```
+
+Builds with `harness = false` (so it's a regular `fn main()`, not
+the unstable `#[bench]` harness) and runs a hand-rolled
+`black_box`-fenced timing loop for `first_uniform` and the full
+resampling pipeline. See `INTERNALS.md` §5.5 for methodology and
+§6 for typical numbers.
 
 ## Implementation notes & math proofs
 
