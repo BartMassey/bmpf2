@@ -10,8 +10,7 @@
 
 use ltsis::{first_uniform, resample_indices, resample_indices_buffered, SortedUniforms};
 use rand::rngs::StdRng;
-use rand::Rng;
-use rand::SeedableRng;
+use rand::{Rng, RngExt, SeedableRng};
 
 // ---------------------------------------------------------------------------
 // Calibrated thresholds for <1e-10 per-test false-failure probability.
@@ -47,7 +46,7 @@ const CHISQ_Z: f64 = 7.0;
 fn min_of_k_uniforms_naive<R: Rng + ?Sized>(rng: &mut R, k: u32) -> f32 {
     let mut m: f32 = 1.0;
     for _ in 0..k {
-        let u: f32 = rng.gen();
+        let u: f32 = rng.random();
         if u < m {
             m = u;
         }
@@ -92,7 +91,7 @@ fn naive_multinomial<R: Rng + ?Sized>(rng: &mut R, weights: &[f32], out: &mut [u
         cum[i] = t;
     }
     for slot in out.iter_mut() {
-        let u: f64 = rng.gen();
+        let u: f64 = rng.random();
         let target = u * t;
         let idx = cum.partition_point(|&c| c <= target);
         *slot = idx.min(weights.len() - 1) as u32;
