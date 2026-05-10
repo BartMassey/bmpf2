@@ -2,6 +2,10 @@
 name = "ltsis"
 version = "0.1.0"
 edition = "2021"
+# Tracks the highest MSRV among our direct dependencies. `rand` 0.10
+# and `rand_distr` 0.6 both declare `rust-version = "1.85"`; nothing
+# in our own code requires anything newer.
+rust-version = "1.85"
 authors = [
     "Bart Massey <bart.massey@gmail.com>",
     "Claude <noreply@anthropic.com>",
@@ -13,7 +17,6 @@ documentation = "https://docs.rs/ltsis"
 readme = "README.md"
 keywords = ["sampling", "resampling", "monte-carlo", "statistics", "no-std"]
 categories = ["mathematics", "no-std", "algorithms"]
-exclude = ["HANDOFF.md"]
 
 [features]
 # Default: std. Library uses `f32::powf` (in `first_uniform`) and
@@ -46,3 +49,9 @@ harness = false
 [lib]
 name = "ltsis"
 path = "src/lib.rs"
+
+# docs.rs builds the published crate with default features only by
+# default. Build with all features so users browsing the rendered
+# docs see both `std` and `libm` configurations documented.
+[package.metadata.docs.rs]
+all-features = true

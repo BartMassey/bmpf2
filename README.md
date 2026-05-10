@@ -1,5 +1,10 @@
 # `ltsis` — Sequential Importance Resampling primitives
 
+[![Crates.io](https://img.shields.io/crates/v/ltsis.svg)](https://crates.io/crates/ltsis)
+[![Documentation](https://docs.rs/ltsis/badge.svg)](https://docs.rs/ltsis)
+[![CI](https://github.com/BartMassey/ltsis/actions/workflows/ci.yml/badge.svg)](https://github.com/BartMassey/ltsis/actions/workflows/ci.yml)
+[![License: MIT OR Apache-2.0](https://img.shields.io/crates/l/ltsis.svg)](#license)
+
 A Rust library for **Sequential Importance Resampling (SIR) with
 replacement** — also known as **multinomial resampling** — the
 weighted-resampling step at the heart of Bayesian particle filters

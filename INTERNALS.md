@@ -586,16 +586,7 @@ plausibly win 30–50%. Whether that's worth the complexity
 (correctness proof for one-sidedness, careful slow-path semantics)
 depends on the deployment target.
 
-### 7.2. CI
-
-Add a GitHub Actions workflow covering:
-- Both feature configurations (`default` = `std`, `--no-default-features --features libm`).
-- `cargo fmt --check`.
-- `cargo clippy --all-targets` (deny warnings).
-- `cargo test`.
-- `cargo doc --no-deps`.
-
-### 7.3. Bayesian particle filter API
+### 7.2. Bayesian particle filter API
 
 A higher-level API on top of the resampling primitives, building
 toward a complete particle-filter library. Deferred indefinitely;
