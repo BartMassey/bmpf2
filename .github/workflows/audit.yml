@@ -1,0 +1,38 @@
+name: Security audit
+
+on:
+  # Weekly Monday at 06:00 UTC. The RustSec advisory database evolves
+  # independently of our code, so this catches new advisories that
+  # land between our own commits.
+  schedule:
+    - cron: "0 6 * * 1"
+  # Re-run when our dependency declarations change.
+  push:
+    branches: [main]
+    paths:
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/audit.yml"
+  pull_request:
+    branches: [main]
+    paths:
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/audit.yml"
+  # Allow manual runs from the Actions tab.
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+  checks: write
+
+jobs:
+  audit:
+    name: cargo-audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: rustsec/audit-check@v2
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
