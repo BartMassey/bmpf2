@@ -8,20 +8,20 @@
 //! the weight distribution, but runs in O(m + n) time using the
 //! merge-with-sorted-uniforms construction of Massey 2008.
 //!
-//! Two variants:
+//! Two variants, identical signatures:
 //!
-//! - [`resample_indices`] — **streaming**. No extra memory beyond
-//!   the output slice. Calls [`crate::first_uniform`] (one `powf`)
-//!   per output index.
-//! - [`resample_indices_buffered`] — **buffered**. Caller supplies
-//!   an `n`-element scratch buffer; in exchange, the per-element
-//!   cost drops because it generates sorted uniforms via Gamma
-//!   ratios (Exp(1) draws) instead of `powf`. Typically ~1.3×
-//!   faster on x86; more on hardware with a slow `powf`.
+//! - [`resample_indices`] — **streaming**. Calls
+//!   [`crate::first_uniform`] (one `powf`) per output index.
+//! - [`resample_indices_buffered`] — **buffered**. Generates sorted
+//!   uniforms via Gamma ratios (Exp(1) draws) instead of `powf`.
+//!   Typically ~1.3× faster on x86; more on hardware with a slow
+//!   `powf`. Internally repurposes the `out` slice as scratch (each
+//!   `u32` slot temporarily holds the f32 bit pattern of an Exp
+//!   draw via [`f32::to_bits`]), so no extra allocation needed.
 //!
 //! Both produce the same statistical output (multinomial-distributed
-//! indices in ascending order). Pick whichever fits your memory
-//! budget.
+//! indices in ascending order). Pick whichever fits your performance
+//! budget; neither needs caller-supplied scratch.
 //!
 //! Numerical robustness: every multi-term accumulator on the data
 //! path uses Kahan compensated summation, so the per-accumulator
@@ -53,8 +53,14 @@ fn kahan_add(sum: &mut f32, c: &mut f32, x: f32) {
 /// ascending order; callers who need them shuffled should permute
 /// `out` afterward.
 ///
+/// Indices are written as `u32` rather than `usize` so the API has
+/// the same layout on every platform (16-bit, 32-bit, 64-bit). The
+/// caller will need to cast each index back to `usize` to use it as
+/// a slice index.
+///
 /// # Preconditions
 /// - `weights` is nonempty.
+/// - `weights.len()` fits in a `u32` (i.e. ≤ `u32::MAX`).
 /// - All entries of `weights` are finite and nonnegative.
 /// - The sum of `weights` is strictly positive.
 ///
@@ -62,16 +68,19 @@ fn kahan_add(sum: &mut f32, c: &mut f32, x: f32) {
 /// undefined (but memory-safe) output in release.
 ///
 /// # See also
-/// [`resample_indices_buffered`] — same statistical contract,
-/// typically ~1.3× faster on x86 (more on hardware with a slow
-/// `powf`), but requires a caller-supplied scratch buffer of length
-/// `out.len()`.
+/// [`resample_indices_buffered`] — same statistical contract and
+/// signature, typically ~1.3× faster on x86 (more on hardware with
+/// a slow `powf`).
 ///
 /// # Panics
 /// Panics in debug if preconditions are violated. Always panics if
 /// `weights.is_empty()`.
-pub fn resample_indices<R: Rng + ?Sized>(rng: &mut R, weights: &[f32], out: &mut [usize]) {
+pub fn resample_indices<R: Rng + ?Sized>(rng: &mut R, weights: &[f32], out: &mut [u32]) {
     assert!(!weights.is_empty(), "weights must be nonempty");
+    debug_assert!(
+        weights.len() <= u32::MAX as usize,
+        "weights.len() must fit in u32"
+    );
 
     if out.is_empty() {
         return;
@@ -95,7 +104,9 @@ pub fn resample_indices<R: Rng + ?Sized>(rng: &mut R, weights: &[f32], out: &mut
     // Streaming merge. `j` advances monotonically through `weights`;
     // `(cumulative, cumulative_c)` is the Kahan state for
     // `w_0 + ... + w_j`. Initialized as if we'd just Kahan-added
-    // weights[0] to (0, 0): that step yields (weights[0], 0).
+    // weights[0] to (0, 0): that step yields (weights[0], 0). `j` is
+    // kept as `usize` for slice indexing and cast to `u32` on store
+    // (the `weights.len() <= u32::MAX` precondition makes this lossless).
     let mut j: usize = 0;
     let mut cumulative = weights[0];
     let mut cumulative_c = 0.0_f32;
@@ -108,26 +119,35 @@ pub fn resample_indices<R: Rng + ?Sized>(rng: &mut R, weights: &[f32], out: &mut
             j += 1;
             kahan_add(&mut cumulative, &mut cumulative_c, weights[j]);
         }
-        *slot = j;
+        *slot = j as u32;
     }
 }
 
 /// Buffered weighted resampler: same statistical contract as
 /// [`resample_indices`], typically ~1.3× faster on x86 (more on
-/// hardware with a slow `powf`), but requires a caller-supplied
-/// scratch buffer of length `out.len()`.
+/// hardware with a slow `powf`).
 ///
 /// # Algorithm
 /// Draw `n + 1` Exp(1) variates `E_1, …, E_{n+1}`. Let
 /// `G = E_1 + … + E_{n+1}` and `S_i = E_1 + … + E_i`. Then
 /// `U_(i) = S_i / G` for `i = 1, …, n` are exactly the order
 /// statistics of `n` iid Uniform(0, 1) draws (a standard result on
-/// Gamma / Beta distribution ratios). The function fills `scratch`
-/// with the first `n` Exp draws, accumulates `G` (with the (n+1)-th
-/// draw added but not stored), then walks `scratch` left-to-right
-/// computing `S_i / G` and merging against the cumulative weight
-/// vector. Note that this routine does *not* go through
+/// Gamma / Beta distribution ratios). The function fills `out` with
+/// the first `n` Exp draws (storing each as the f32's bit pattern via
+/// [`f32::to_bits`]), accumulates `G` (with the (n+1)-th draw added
+/// but not stored), then walks `out` left-to-right computing
+/// `S_i / G` and merging against the cumulative weight vector —
+/// overwriting each slot's stored Exp variate with the corresponding
+/// output index in the same pass. This routine does *not* go through
 /// [`crate::first_uniform`] or [`crate::SortedUniforms`].
+///
+/// # In-place scratch
+/// The function uses `out` itself as scratch: each `u32` slot
+/// temporarily holds an f32 bit pattern via [`f32::to_bits`] in
+/// Phase 1, before being overwritten with the output index in
+/// Phase 2. Round-trips through `to_bits` / `from_bits` are exact
+/// for every f32 value (including NaN and ±∞). Slots are exactly
+/// 32 bits, so the layout is identical on every platform.
 ///
 /// Compared to [`resample_indices`]:
 ///
@@ -136,8 +156,8 @@ pub fn resample_indices<R: Rng + ?Sized>(rng: &mut R, weights: &[f32], out: &mut
 ///   `powf` dominates per-call cost. The buffered variant replaces
 ///   this with an Exp(1) draw (Ziggurat, no transcendental on the
 ///   fast path) plus a multiplication by `1/G`.
-/// - **Needs scratch.** Caller supplies `&mut [f32]` of length
-///   `out.len()`. On 32-bit MCU this costs `4n` extra bytes.
+/// - **Same memory.** Both signatures are identical: `rng`,
+///   `weights`, `out`. No caller-supplied scratch.
 /// - **Same statistical output.** Both methods produce indices
 ///   distributed as iid multinomial draws on `weights`, in ascending
 ///   order.
@@ -160,24 +180,18 @@ pub fn resample_indices<R: Rng + ?Sized>(rng: &mut R, weights: &[f32], out: &mut
 ///
 /// # Preconditions
 /// - `weights` is nonempty.
-/// - `scratch.len() == out.len()`.
+/// - `weights.len()` fits in a `u32` (i.e. ≤ `u32::MAX`).
 /// - All entries of `weights` are finite and nonnegative.
 /// - The sum of `weights` is strictly positive.
 ///
 /// # Panics
-/// Panics if `weights.is_empty()` or if `scratch.len() != out.len()`.
-/// Panics in debug if weights are non-finite/negative or sum to zero.
-pub fn resample_indices_buffered<R: Rng + ?Sized>(
-    rng: &mut R,
-    weights: &[f32],
-    out: &mut [usize],
-    scratch: &mut [f32],
-) {
+/// Panics if `weights.is_empty()`. Panics in debug if weights are
+/// non-finite/negative or sum to zero.
+pub fn resample_indices_buffered<R: Rng + ?Sized>(rng: &mut R, weights: &[f32], out: &mut [u32]) {
     assert!(!weights.is_empty(), "weights must be nonempty");
-    assert_eq!(
-        scratch.len(),
-        out.len(),
-        "scratch length must equal out length"
+    debug_assert!(
+        weights.len() <= u32::MAX as usize,
+        "weights.len() must fit in u32"
     );
 
     if out.is_empty() {
@@ -194,20 +208,24 @@ pub fn resample_indices_buffered<R: Rng + ?Sized>(
     }
     debug_assert!(total > 0.0, "total weight must be strictly positive");
 
-    // Phase 1: fill scratch with E_1..E_n, Kahan-accumulate G
-    // including E_{n+1}. Storing E_{n+1} is unnecessary — we only
-    // need its contribution to G so that S_n / G < 1 strictly.
+    // Phase 1: fill `out` with E_1..E_n, encoded as f32 bit patterns
+    // (each `u32` slot holds one Exp draw's bits exactly). Kahan-
+    // accumulate G including E_{n+1}. Storing E_{n+1} is unnecessary
+    // — we only need its contribution to G so that S_n / G < 1
+    // strictly.
     let mut g = 0.0_f32;
     let mut g_c = 0.0_f32;
-    for slot in scratch.iter_mut() {
+    for slot in out.iter_mut() {
         let e: f32 = Exp1.sample(rng);
-        *slot = e;
+        *slot = e.to_bits();
         kahan_add(&mut g, &mut g_c, e);
     }
     let e_extra: f32 = Exp1.sample(rng);
     kahan_add(&mut g, &mut g_c, e_extra);
 
-    // Phase 2: walk scratch left-to-right. cumulative_e accumulates
+    // Phase 2: walk `out` left-to-right. Each slot is read back as
+    // f32 (recovering the Exp draw), then overwritten with its
+    // output index in the same iteration. cumulative_e accumulates
     // S_i = E_1 + … + E_i (Kahan); u_i = S_i / G is the i-th sorted
     // uniform. Merge against weights with Kahan on `cumulative_w`
     // and the safeguard `target.min(total)`; see the doc comment
@@ -219,8 +237,9 @@ pub fn resample_indices_buffered<R: Rng + ?Sized>(
     let mut cumulative_w = weights[0];
     let mut cumulative_w_c = 0.0_f32;
 
-    for (slot_in, slot_out) in scratch.iter().zip(out.iter_mut()) {
-        kahan_add(&mut cumulative_e, &mut ce_c, *slot_in);
+    for slot in out.iter_mut() {
+        let e = f32::from_bits(*slot);
+        kahan_add(&mut cumulative_e, &mut ce_c, e);
 
         let u = cumulative_e * inv_g;
         let target = (total * u).min(total);
@@ -228,6 +247,6 @@ pub fn resample_indices_buffered<R: Rng + ?Sized>(
             j += 1;
             kahan_add(&mut cumulative_w, &mut cumulative_w_c, weights[j]);
         }
-        *slot_out = j;
+        *slot = j as u32;
     }
 }

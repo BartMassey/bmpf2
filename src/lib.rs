@@ -12,14 +12,19 @@
 //! sequential Monte Carlo methods. See `README.md` for a tutorial
 //! introduction.
 //!
+//! Indices are written as `u32`, not `usize`, so the API has the
+//! same layout on every platform (16-, 32-, or 64-bit). Callers
+//! cast to `usize` to use them as slice indices.
+//!
 //! # API at a glance
 //!
-//! - [`resample_indices`] — the main entry point. **Streaming**: no
-//!   extra memory beyond the output slice.
-//! - [`resample_indices_buffered`] — same statistical contract,
-//!   typically ~1.3× faster on x86 (more on hardware with a slow
-//!   `powf`), at the cost of a caller-supplied `n`-element scratch
-//!   buffer.
+//! - [`resample_indices`] — the main entry point. **Streaming**:
+//!   one `powf` call per output index.
+//! - [`resample_indices_buffered`] — same signature and statistical
+//!   contract, typically ~1.3× faster on x86 (more on hardware with
+//!   a slow `powf`). Repurposes the `out` slice as scratch (each
+//!   `usize` slot temporarily holds the f32 bit pattern of an Exp(1)
+//!   draw via [`f32::to_bits`]); no extra allocation.
 //! - [`SortedUniforms`] — the underlying order-statistic iterator
 //!   used by [`resample_indices`]. Yields `n` Uniform(0, 1) variates
 //!   in ascending order in O(n) time. Exposed because it's useful in
@@ -56,8 +61,8 @@
 //!
 //! Enable exactly one. The library performs no allocation: it
 //! operates over caller-supplied slices (`&[f32]` for weights,
-//! `&mut [usize]` for resample output, `&mut [f32]` for scratch) and
-//! never calls into `alloc`.
+//! `&mut [u32]` for resample output) and never calls into
+//! `alloc`.
 //!
 //! [`libm`]: https://crates.io/crates/libm
 //! [`num_traits`]: https://crates.io/crates/num-traits

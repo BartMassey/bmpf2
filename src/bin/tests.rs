@@ -45,17 +45,11 @@ fn main() {
     println!();
     all_passed &= test_resample_marginals("streaming", resample_indices);
     println!();
-    all_passed &= test_resample_marginals("buffered", |rng, w, o| {
-        let mut scratch = vec![0.0_f32; o.len()];
-        resample_indices_buffered(rng, w, o, &mut scratch);
-    });
+    all_passed &= test_resample_marginals("buffered", resample_indices_buffered);
     println!();
     all_passed &= test_resample_vs_multinomial("streaming", resample_indices);
     println!();
-    all_passed &= test_resample_vs_multinomial("buffered", |rng, w, o| {
-        let mut scratch = vec![0.0_f32; o.len()];
-        resample_indices_buffered(rng, w, o, &mut scratch);
-    });
+    all_passed &= test_resample_vs_multinomial("buffered", resample_indices_buffered);
     println!();
 
     bench();
@@ -366,7 +360,7 @@ fn weights_from_f64(ws: &[f64]) -> Vec<f32> {
 /// goodness-of-fit. Runs once per resampler (streaming, buffered).
 fn test_resample_marginals<Resampler>(method: &str, mut resample: Resampler) -> bool
 where
-    Resampler: FnMut(&mut StdRng, &[f32], &mut [usize]),
+    Resampler: FnMut(&mut StdRng, &[f32], &mut [u32]),
 {
     println!("[Test] Resampling: index marginal probabilities (chi-squared) [{method}]");
     let mut rng = StdRng::seed_from_u64(0xFEED_BEEF);
@@ -393,11 +387,11 @@ where
         let total_draws = n_per_run * n_runs;
 
         let mut counts = vec![0u64; m];
-        let mut buf = vec![0usize; n_per_run];
+        let mut buf = vec![0u32; n_per_run];
         for _ in 0..n_runs {
             resample(&mut rng, &weights, &mut buf);
             for &idx in &buf {
-                counts[idx] += 1;
+                counts[idx as usize] += 1;
             }
         }
 
@@ -438,7 +432,7 @@ where
 /// chi-squared on the index-count vectors. Runs once per resampler.
 fn test_resample_vs_multinomial<Resampler>(method: &str, mut resample: Resampler) -> bool
 where
-    Resampler: FnMut(&mut StdRng, &[f32], &mut [usize]),
+    Resampler: FnMut(&mut StdRng, &[f32], &mut [u32]),
 {
     println!("[Test] Resampling matches naive multinomial (two-sample χ²) [{method}]");
     let mut rng_a = StdRng::seed_from_u64(0xA1A1_A1A1);
@@ -462,16 +456,16 @@ where
 
         let mut counts_a = vec![0u64; m];
         let mut counts_b = vec![0u64; m];
-        let mut buf = vec![0usize; n_per_run];
+        let mut buf = vec![0u32; n_per_run];
 
         for _ in 0..n_runs {
             resample(&mut rng_a, &weights, &mut buf);
             for &idx in &buf {
-                counts_a[idx] += 1;
+                counts_a[idx as usize] += 1;
             }
             naive_multinomial(&mut rng_b, &weights, &mut buf);
             for &idx in &buf {
-                counts_b[idx] += 1;
+                counts_b[idx as usize] += 1;
             }
         }
 
@@ -519,7 +513,7 @@ where
 /// compared against, so the reference should be more accurate than
 /// the implementation under test, not bitten by the same n·2⁻²⁴
 /// prefix-sum noise.
-fn naive_multinomial<R: Rng + ?Sized>(rng: &mut R, weights: &[f32], out: &mut [usize]) {
+fn naive_multinomial<R: Rng + ?Sized>(rng: &mut R, weights: &[f32], out: &mut [u32]) {
     let mut cum = vec![0.0_f64; weights.len()];
     let mut t = 0.0_f64;
     for (i, &w) in weights.iter().enumerate() {
@@ -531,7 +525,7 @@ fn naive_multinomial<R: Rng + ?Sized>(rng: &mut R, weights: &[f32], out: &mut [u
         let target = u * t;
         // partition_point: first index with cum[idx] > target
         let idx = cum.partition_point(|&c| c <= target);
-        *slot = idx.min(weights.len() - 1);
+        *slot = idx.min(weights.len() - 1) as u32;
     }
 }
 
@@ -571,8 +565,7 @@ fn bench_resample() {
     for &m in &[100usize, 1_000, 10_000, 100_000, 1_000_000] {
         let weights: Vec<f32> = (1..=m).map(|x| x as f32).collect();
         let n = m;
-        let mut out = vec![0usize; n];
-        let mut scratch = vec![0.0_f32; n];
+        let mut out = vec![0u32; n];
 
         let n_runs = ((30_000_000 / (m + n)).max(3)) as u64;
 
@@ -596,7 +589,7 @@ fn bench_resample() {
         // Buffered.
         let mut rng_b = StdRng::seed_from_u64(0x1234);
         for _ in 0..3 {
-            resample_indices_buffered(&mut rng_b, &weights, &mut out, &mut scratch);
+            resample_indices_buffered(&mut rng_b, &weights, &mut out);
         }
         let t0 = Instant::now();
         for _ in 0..n_runs {
@@ -604,7 +597,6 @@ fn bench_resample() {
                 black_box(&mut rng_b),
                 black_box(&weights),
                 black_box(&mut out),
-                black_box(&mut scratch),
             );
         }
         let elapsed_b = t0.elapsed();

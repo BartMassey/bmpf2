@@ -21,11 +21,14 @@ let mut rng = rand::rngs::StdRng::seed_from_u64(42);
 let weights = vec![1.0_f32, 3.0, 2.0, 4.0];
 
 // Resample 1000 indices from this distribution.
-let mut out = vec![0_usize; 1000];
+let mut out = vec![0_u32; 1000];
 resample_indices(&mut rng, &weights, &mut out);
 
 // `out[i]` ∈ {0, 1, 2, 3}; index 3 (weight 4.0) appears about 4× as
 // often as index 0 (weight 1.0). Output is in ascending order.
+//
+// To use an output index for slice indexing, cast to usize:
+//   let particle = particles[out[i] as usize];
 ```
 
 ## Background: Sequential Importance Resampling
@@ -58,15 +61,24 @@ O(n) pass, then merge them against the cumulative weight array in
 another O(m + n) pass. The output is statistically equivalent to `n`
 iid multinomial draws from the weight distribution.
 
-Two resamplers are exposed; pick whichever fits your memory budget:
+Two resamplers are exposed, with **identical signatures** — pick
+whichever fits your performance budget:
 
-- `resample_indices` — **streaming**. No extra memory beyond the
-  output slice. One `powf` call per output index.
-- `resample_indices_buffered` — **buffered**. Caller supplies an
-  `n`-element scratch buffer; in exchange, the per-element cost
-  drops because it generates sorted uniforms via Gamma ratios
-  (Exp(1) draws) rather than `powf`. Typically ~1.3× faster on x86;
-  more on hardware with a slow `powf`.
+- `resample_indices` — **streaming**. One `powf` call per output
+  index.
+- `resample_indices_buffered` — **buffered**. Generates sorted
+  uniforms via Gamma ratios (Exp(1) draws) rather than `powf`.
+  Typically ~1.3× faster on x86; more on hardware with a slow
+  `powf`. Internally repurposes the `out` slice as scratch (each
+  `u32` slot temporarily holds an Exp draw's f32 bit pattern via
+  `f32::to_bits`), then overwrites with the index in a second pass.
+
+Neither resampler needs caller-supplied scratch.
+
+Indices are written as `u32` for platform-independent layout — not
+`usize` — so callers will need a `as usize` cast at the index site
+(`particles[out[i] as usize]`). Weights arrays must therefore have
+length ≤ `u32::MAX`; debug builds assert this.
 
 The order-statistic iterator behind `resample_indices` is also
 exposed as `SortedUniforms`, useful in its own right (e.g. for
