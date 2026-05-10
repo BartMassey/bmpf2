@@ -9,7 +9,7 @@
 //! Methodology is documented in `INTERNALS.md` §5.4.
 
 use ltsis::{first_uniform, resample_indices, resample_indices_buffered, SortedUniforms};
-use rand::rngs::StdRng;
+use rand::rngs::SmallRng;
 use rand::{Rng, RngExt, SeedableRng};
 
 // ---------------------------------------------------------------------------
@@ -113,7 +113,7 @@ fn chisq_critical(dof: i32, z: f64) -> f64 {
 /// `[0, 1)`. No false-failure probability under correct code.
 #[test]
 fn range() {
-    let mut rng = StdRng::seed_from_u64(0xC0FFEE);
+    let mut rng = SmallRng::seed_from_u64(0xC0FFEE);
     for &k in &[1u32, 2, 3, 5, 10, 100, 1000] {
         for _ in 0..100_000 {
             let x = first_uniform(&mut rng, k);
@@ -135,7 +135,7 @@ fn range() {
 /// far below 1e-10).
 #[test]
 fn moments_first_uniform() {
-    let mut rng = StdRng::seed_from_u64(0xDEADBEEF);
+    let mut rng = SmallRng::seed_from_u64(0xDEADBEEF);
     let n_samples = 1_000_000;
 
     for &k in &[1u32, 2, 3, 5, 10, 50, 200] {
@@ -172,7 +172,7 @@ fn moments_first_uniform() {
 /// analytic CDF of Beta(1, k):  F_k(x) = 1 − (1 − x)^k.
 #[test]
 fn ks_against_theory() {
-    let mut rng = StdRng::seed_from_u64(0x12345678);
+    let mut rng = SmallRng::seed_from_u64(0x12345678);
     let n = 50_000;
 
     for &k in &[1u32, 2, 3, 5, 10, 50, 200] {
@@ -207,8 +207,8 @@ fn ks_against_theory() {
 /// matches the distribution it claims to sample.
 #[test]
 fn ks_against_min_oracle() {
-    let mut rng_a = StdRng::seed_from_u64(0xAAAA_AAAA);
-    let mut rng_b = StdRng::seed_from_u64(0xBBBB_BBBB);
+    let mut rng_a = SmallRng::seed_from_u64(0xAAAA_AAAA);
+    let mut rng_b = SmallRng::seed_from_u64(0xBBBB_BBBB);
     let n = 20_000;
 
     for &k in &[2u32, 3, 5, 10, 50] {
@@ -242,7 +242,7 @@ fn ks_against_min_oracle() {
 /// `n_positions · P(|Z| > NORMAL_Z_MAX_OVER_POS) < 1e-10`.
 #[test]
 fn sorted_uniforms_moments() {
-    let mut rng = StdRng::seed_from_u64(0xABCD_1234);
+    let mut rng = SmallRng::seed_from_u64(0xABCD_1234);
 
     for &n in &[5u32, 20, 100] {
         let n_runs = 200_000;
@@ -291,7 +291,7 @@ fn sorted_uniforms_moments() {
 /// uniforms across many runs is Uniform(0, 1).
 #[test]
 fn sorted_uniforms_pooled_ks() {
-    let mut rng = StdRng::seed_from_u64(0xCAFE_F00D);
+    let mut rng = SmallRng::seed_from_u64(0xCAFE_F00D);
 
     for &n in &[10u32, 100, 1000] {
         let n_runs = 50_000 / n.max(1) as usize;
@@ -327,9 +327,9 @@ fn sorted_uniforms_pooled_ks() {
 
 fn resample_marginals<R>(method: &str, mut resample: R)
 where
-    R: FnMut(&mut StdRng, &[f32], &mut [u32]),
+    R: FnMut(&mut SmallRng, &[f32], &mut [u32]),
 {
-    let mut rng = StdRng::seed_from_u64(0xFEED_BEEF);
+    let mut rng = SmallRng::seed_from_u64(0xFEED_BEEF);
 
     let test_cases: Vec<(&str, Vec<f64>)> = vec![
         ("uniform-10", vec![1.0; 10]),
@@ -398,10 +398,10 @@ fn resample_marginals_buffered() {
 
 fn resample_vs_multinomial<R>(method: &str, mut resample: R)
 where
-    R: FnMut(&mut StdRng, &[f32], &mut [u32]),
+    R: FnMut(&mut SmallRng, &[f32], &mut [u32]),
 {
-    let mut rng_a = StdRng::seed_from_u64(0xA1A1_A1A1);
-    let mut rng_b = StdRng::seed_from_u64(0xB2B2_B2B2);
+    let mut rng_a = SmallRng::seed_from_u64(0xA1A1_A1A1);
+    let mut rng_b = SmallRng::seed_from_u64(0xB2B2_B2B2);
 
     let test_cases: Vec<(&str, Vec<f64>)> = vec![
         ("uniform-10", vec![1.0; 10]),

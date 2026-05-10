@@ -510,27 +510,31 @@ of one scalar `f32::powf` on the host's libm.
 
 | k | ns/sample |
 |----|----|
-| 2  | 8.7 – 9.2 |
-| 5  | 8.7 – 9.2 |
-| 10 | 8.7 – 9.2 |
-| 50 | 8.7 – 9.2 |
-| 200 | 8.7 – 9.2 |
-| 1000 | 8.7 – 9.2 |
+| 2  | 9.9 |
+| 5  | 10.1 |
+| 10 | 10.0 |
+| 50 | 10.1 |
+| 200 | 9.9 |
+| 1000 | 10.0 |
 
-Essentially flat in `k`. Dominated by the scalar `f32::powf` call.
+Essentially flat in `k`. Dominated by the scalar `f32::powf` call;
+the RNG (Xoshiro256++ in `SmallRng`) is sub-nanosecond per draw and
+contributes ~1 ns at most.
 
 ### 6.2. Full resampling pipeline
 
-`m = n`, weights `1..=m`, `f32`, all calls `black_box`-fenced.
+`m = n`, weights `1..=m`, `f32`, all calls `black_box`-fenced,
+SmallRng (Xoshiro256++) seed-based. Run-to-run variance is ~3% on
+each cell.
 
 ```
     m = n     streaming                buffered              streaming
               ns/call    ns/step       ns/call    ns/step    /buffered
-      100         2938     14.69          2294     11.47        1.28x
-     1000        29668     14.83         23149     11.57        1.28x
-    10000       293323     14.67        230499     11.52        1.27x
-   100000      2918029     14.59       2275946     11.38        1.28x
-  1000000     29067435     14.53      22662423     11.33        1.28x
+      100         2870     14.35          2161     10.81        1.33x
+     1000        29184     14.59         21862     10.93        1.33x
+    10000       284775     14.24        222624     11.13        1.28x
+   100000      2892905     14.46       2193198     10.97        1.32x
+  1000000     28895398     14.45      21832852     10.92        1.32x
 ```
 
 Linear scaling clean across five orders of magnitude. Per-step
@@ -543,7 +547,7 @@ is touched in a single forward sweep.
 
 On Cortex-M4F (no SIMD, scalar `powf` ~100–150 cycles, `Exp(1)`
 Ziggurat ~30–60 cycles), the buffered variant is expected to win
-by a larger margin than the ~1.28× we see on x86. We have no on-
+by a larger margin than the ~1.32× we see on x86. We have no on-
 target measurements yet.
 
 ---

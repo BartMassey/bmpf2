@@ -12,7 +12,7 @@
 //!   probability proportional to its weight. Output is in ascending
 //!   order. Streaming: one `powf` call per output index.
 //! - [`resample_indices_buffered`] — same signature and statistical
-//!   contract, typically ~1.28× faster on x86 (more on hardware with
+//!   contract, typically ~1.32× faster on x86 (more on hardware with
 //!   a slow `powf`).
 //! - [`SortedUniforms`] — iterator yielding `n` Uniform(0, 1) variates
 //!   in ascending order in O(n) time. Useful in its own right outside

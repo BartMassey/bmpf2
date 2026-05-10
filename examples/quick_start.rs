@@ -8,7 +8,7 @@ use ltsis::resample_indices;
 use rand::SeedableRng;
 
 fn main() {
-    let mut rng = rand::rngs::StdRng::seed_from_u64(42);
+    let mut rng = rand::rngs::SmallRng::seed_from_u64(42);
 
     // Some weighted population. Weights need not be normalized.
     let weights = vec![1.0_f32, 3.0, 2.0, 4.0];

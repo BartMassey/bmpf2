@@ -20,7 +20,7 @@ weight, in O(n) time. Implements the algorithm of Massey
 use ltsis::resample_indices;
 use rand::SeedableRng;
 
-let mut rng = rand::rngs::StdRng::seed_from_u64(42);
+let mut rng = rand::rngs::SmallRng::seed_from_u64(42);
 
 // Some weighted population. Weights need not be normalized.
 let weights = vec![1.0_f32, 3.0, 2.0, 4.0];
@@ -74,7 +74,7 @@ performance budget. Neither needs caller-supplied scratch.
   call per output index.
 - **`resample_indices_buffered(rng, weights, out)`** — buffered.
   Generates sorted uniforms via Gamma ratios (Exp(1) draws) rather
-  than `powf`. Typically ~1.28× faster on x86; more on hardware
+  than `powf`. Typically ~1.32× faster on x86; more on hardware
   with a slow `powf`. Internally repurposes the `out` slice as
   scratch.
 
@@ -118,13 +118,14 @@ ltsis = { version = "0.1", default-features = false, features = ["libm"] }
 
 ## Performance
 
-On modern x86 with a tuned libm: `first_uniform` runs at ~9 ns/call,
-`resample_indices` at ~14.7 ns/step, `resample_indices_buffered` at
-~11.4 ns/step (`black_box`-fenced microbench, scalar per-call
-cost). On Cortex-M4F the buffered variant is expected to win by a
-larger margin than on x86 because scalar `powf` is much more
-expensive than the Exp(1) Ziggurat there. See `INTERNALS.md` for
-methodology, full bench tables, and Cortex-M expectations.
+On modern x86 with a tuned libm: `first_uniform` runs at ~10 ns/call,
+`resample_indices` at ~14.4 ns/step, `resample_indices_buffered` at
+~10.9 ns/step (`black_box`-fenced microbench, scalar per-call cost,
+SmallRng/Xoshiro256++). On Cortex-M4F the buffered variant is
+expected to win by a larger margin than on x86 because scalar
+`powf` is much more expensive than the Exp(1) Ziggurat there. See
+`INTERNALS.md` for methodology, full bench tables, and Cortex-M
+expectations.
 
 ## Testing & benchmarking
 

@@ -25,9 +25,15 @@ categories = ["mathematics", "no-std", "algorithms"]
 default = ["std"]
 
 # `std`: pulls in std's libm bindings via num-traits, plus rand's
-# stdlib integration (StdRng, Standard distribution etc.). Also
-# required by the integration tests and benchmark harness.
-std = ["num-traits/std", "rand/std", "rand/std_rng", "rand_distr/std"]
+# stdlib integration. Also required by the integration tests and
+# benchmark harness.
+#
+# We deliberately do NOT enable `rand/std_rng`: that feature would
+# pull in the ChaCha20 cipher chain to provide `StdRng`, which is
+# overkill for a non-cryptographic resampling library. Tests, benches,
+# and the example use `rand::rngs::SmallRng` (Xoshiro256++) instead;
+# `SmallRng` is always available in rand 0.10 with no feature flag.
+std = ["num-traits/std", "rand/std", "rand_distr/std"]
 
 # `libm`: routes transcendental math (`powf`, etc.) through the `libm`
 # crate via `num-traits`. Use this in `no_std` builds; enable exactly

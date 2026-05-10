@@ -13,7 +13,7 @@
 //!   index.
 //! - [`resample_indices_buffered`] — **buffered**. Generates sorted
 //!   uniforms via Gamma ratios (Exp(1) draws) instead of `powf`.
-//!   Typically ~1.28× faster on x86; more on hardware with a slow
+//!   Typically ~1.32× faster on x86; more on hardware with a slow
 //!   `powf`. Repurposes `out` as scratch internally.
 //!
 //! Both produce the same statistical output (multinomial-distributed
@@ -60,7 +60,7 @@ fn kahan_add(sum: &mut f32, c: &mut f32, x: f32) {
 ///
 /// # See also
 /// [`resample_indices_buffered`] — same signature and statistical
-/// contract, typically ~1.28× faster on x86 (more on hardware with
+/// contract, typically ~1.32× faster on x86 (more on hardware with
 /// a slow `powf`).
 ///
 /// # Panics
@@ -115,7 +115,7 @@ pub fn resample_indices<R: Rng + ?Sized>(rng: &mut R, weights: &[f32], out: &mut
 }
 
 /// Buffered weighted resampler: same statistical contract and
-/// signature as [`resample_indices`], typically ~1.28× faster on
+/// signature as [`resample_indices`], typically ~1.32× faster on
 /// x86 (more on hardware with a slow `powf`).
 ///
 /// Generates sorted uniforms via the Gamma-ratio identity

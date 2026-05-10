@@ -17,7 +17,7 @@
 //! call site).
 
 use ltsis::{first_uniform, resample_indices, resample_indices_buffered};
-use rand::rngs::StdRng;
+use rand::rngs::SmallRng;
 use rand::SeedableRng;
 use std::hint::black_box;
 use std::time::Instant;
@@ -60,7 +60,7 @@ fn bench_resample() {
         let n_runs = ((30_000_000 / (m + n)).max(3)) as u64;
 
         // Streaming.
-        let mut rng_c = StdRng::seed_from_u64(0x1234);
+        let mut rng_c = SmallRng::seed_from_u64(0x1234);
         for _ in 0..3 {
             resample_indices(&mut rng_c, &weights, &mut out);
         }
@@ -77,7 +77,7 @@ fn bench_resample() {
         let ns_step_c = ns_call_c / (m + n) as f64;
 
         // Buffered.
-        let mut rng_b = StdRng::seed_from_u64(0x1234);
+        let mut rng_b = SmallRng::seed_from_u64(0x1234);
         for _ in 0..3 {
             resample_indices_buffered(&mut rng_b, &weights, &mut out);
         }
@@ -108,9 +108,9 @@ fn bench_resample() {
 /// Run a fenced microbenchmark. Returns ns/sample.
 fn bench_one<Func>(k: u32, n: u64, mut f: Func) -> f64
 where
-    Func: FnMut(&mut StdRng, u32) -> f32,
+    Func: FnMut(&mut SmallRng, u32) -> f32,
 {
-    let mut rng = StdRng::seed_from_u64(0xBEEF);
+    let mut rng = SmallRng::seed_from_u64(0xBEEF);
 
     // Warmup.
     let mut s = 0.0_f32;
