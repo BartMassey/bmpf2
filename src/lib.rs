@@ -50,10 +50,297 @@ compile_error!(
      math (`powf`) is available."
 );
 
-mod first_uniform;
-mod resample;
-mod sorted_uniforms;
+use core::iter::FusedIterator;
 
-pub use first_uniform::first_uniform;
-pub use resample::{resample_indices, resample_indices_buffered};
-pub use sorted_uniforms::SortedUniforms;
+// In no_std mode, `f32::powf` is not an inherent method; we reach it
+// through the `num_traits::Float` trait, which under the `libm`
+// feature dispatches to the `libm` crate. In std mode the inherent
+// method is used directly.
+#[cfg(not(feature = "std"))]
+use num_traits::Float;
+
+use rand::{Rng, RngExt};
+use rand_distr::{Distribution, Exp1};
+
+// ---------------------------------------------------------------------------
+// first_uniform
+// ---------------------------------------------------------------------------
+
+/// Draw a sample distributed as the minimum of `k` iid Uniform(0, 1)
+/// variates (equivalently, `Beta(1, k)` in standard notation).
+///
+/// This is the per-step primitive driving the
+/// order-statistic recurrence in [`SortedUniforms`]. Most callers
+/// won't need this directly.
+///
+/// # Panics
+/// Panics if `k == 0`.
+pub fn first_uniform<R: Rng + ?Sized>(rng: &mut R, k: u32) -> f32 {
+    assert!(k >= 1, "k must be at least 1");
+    let u: f32 = rng.random();
+    if k == 1 {
+        // Beta(1, 1) is Uniform(0, 1); rng.random already returns that.
+        // Equivalent to `1 − (1 − u)^1 = u`.
+        u
+    } else {
+        // Inverse CDF of Beta(1, k). The form `1 − (1 − u)^(1/k)`
+        // (rather than the algebraically-equivalent `1 − u^(1/k)`) is
+        // well-behaved across the entire f32 `rng.random` range — each
+        // of the 2²⁴ input bins maps to a distinct output in [0, 1)
+        // with no special-case redraw needed. See INTERNALS.md §4.1.
+        1.0 - (1.0 - u).powf(1.0 / k as f32)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// SortedUniforms
+// ---------------------------------------------------------------------------
+
+/// Streaming iterator yielding `n` Uniform(0, 1) variates in ascending
+/// order in O(n) time.
+///
+/// The yielded values are distributed exactly as the order statistics
+/// of `n` iid Uniform(0, 1) draws — i.e. the same as drawing `n` iid
+/// uniforms and sorting them, but produced one at a time without a
+/// sort.
+///
+/// Holds a mutable reference to the RNG. Yields exactly `n` values,
+/// then `None` thereafter.
+///
+/// See `INTERNALS.md` §3.1 / §5.1 for the spacings-recurrence
+/// algorithm and its correctness proof.
+pub struct SortedUniforms<'a, R: Rng + ?Sized> {
+    rng: &'a mut R,
+    remaining: u32,
+    last: f32,
+}
+
+impl<'a, R: Rng + ?Sized> SortedUniforms<'a, R> {
+    /// Create an iterator that will yield `n` sorted uniform variates.
+    pub fn new(rng: &'a mut R, n: u32) -> Self {
+        Self {
+            rng,
+            remaining: n,
+            last: 0.0,
+        }
+    }
+}
+
+impl<'a, R: Rng + ?Sized> Iterator for SortedUniforms<'a, R> {
+    type Item = f32;
+
+    #[inline]
+    fn next(&mut self) -> Option<f32> {
+        if self.remaining == 0 {
+            return None;
+        }
+        // Spacings recurrence: U_(i) = U_(i-1) + (1 - U_(i-1)) * Z,
+        // where Z is the minimum of the `remaining` uniforms still
+        // to come — distributed as Beta(1, remaining), supplied by
+        // first_uniform.
+        let spacing = first_uniform(self.rng, self.remaining);
+        self.last = self.last + (1.0 - self.last) * spacing;
+        self.remaining -= 1;
+        Some(self.last)
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let r = self.remaining as usize;
+        (r, Some(r))
+    }
+
+    /// Returns the number of values still to be yielded, without
+    /// consuming them. Overrides the default implementation, which
+    /// would advance the RNG once per remaining value just to count.
+    fn count(self) -> usize {
+        self.remaining as usize
+    }
+}
+
+/// `SortedUniforms` knows its exact remaining length (returned by
+/// `size_hint`), so [`ExactSizeIterator::len`] is available.
+impl<'a, R: Rng + ?Sized> ExactSizeIterator for SortedUniforms<'a, R> {}
+
+/// Once `next()` has returned `None` (i.e. `remaining == 0`), all
+/// subsequent calls also return `None` — the recurrence has no way
+/// to restart.
+impl<'a, R: Rng + ?Sized> FusedIterator for SortedUniforms<'a, R> {}
+
+// ---------------------------------------------------------------------------
+// resample (streaming and buffered)
+// ---------------------------------------------------------------------------
+
+// Kahan compensated add: `*sum += x` with running compensator `*c`.
+// Used for every multi-term accumulator on the data path; reduces
+// f32 prefix-sum error from O(n · 2⁻²⁴) to O(2⁻²⁴ · max|term|),
+// effectively constant in n. See INTERNALS.md §4.6.
+#[inline(always)]
+fn kahan_add(sum: &mut f32, c: &mut f32, x: f32) {
+    let y = x - *c;
+    let t = *sum + y;
+    *c = (t - *sum) - y;
+    *sum = t;
+}
+
+/// Resample `out.len()` indices from `weights`, with each index
+/// drawn iid (with replacement) with probability proportional to
+/// its weight ("multinomial resampling"). Output is in ascending
+/// order; permute `out` afterward if you need it shuffled.
+///
+/// Streaming variant: runs in O(`weights.len()` + `out.len()`)
+/// time, allocates nothing, and uses one [`first_uniform`]
+/// call (one `powf`) per output index.
+///
+/// # Preconditions
+/// - `weights` is nonempty.
+/// - `weights.len()` ≤ `u32::MAX`.
+/// - All entries of `weights` are finite and nonnegative.
+/// - The sum of `weights` is strictly positive.
+///
+/// Violating any of these will panic in debug builds and produce
+/// undefined (but memory-safe) output in release.
+///
+/// # See also
+/// [`resample_indices_buffered`] — same signature and statistical
+/// contract, typically ~1.32× faster on x86 (more on hardware with
+/// a slow `powf`).
+///
+/// # Panics
+/// Panics in debug if preconditions are violated. Always panics if
+/// `weights.is_empty()`.
+pub fn resample_indices<R: Rng + ?Sized>(rng: &mut R, weights: &[f32], out: &mut [u32]) {
+    assert!(!weights.is_empty(), "weights must be nonempty");
+    debug_assert!(
+        weights.len() <= u32::MAX as usize,
+        "weights.len() must fit in u32"
+    );
+
+    if out.is_empty() {
+        return;
+    }
+
+    // Kahan-sum total weight in index order. The merge below re-walks
+    // `weights` in the same index order with its own Kahan accumulator,
+    // so by the time it consumes all weights its state matches `total`
+    // bit-for-bit — load-bearing for Lemma 3 (INTERNALS.md §5.2).
+    let mut total = 0.0_f32;
+    let mut total_c = 0.0_f32;
+    for &w in weights {
+        debug_assert!(w.is_finite() && w >= 0.0, "weight must be finite and ≥ 0");
+        kahan_add(&mut total, &mut total_c, w);
+    }
+    debug_assert!(total > 0.0, "total weight must be strictly positive");
+
+    let n = out.len() as u32;
+    let mut sorted = SortedUniforms::new(rng, n);
+
+    // Streaming merge. `j` advances monotonically through `weights`;
+    // `(cumulative, cumulative_c)` is the Kahan state for
+    // `w_0 + ... + w_j`. Initialized as if we'd just Kahan-added
+    // weights[0] to (0, 0): that step yields (weights[0], 0). `j`
+    // stays `usize` for slice indexing and is cast to `u32` on
+    // store (lossless under the precondition above).
+    let mut j: usize = 0;
+    let mut cumulative = weights[0];
+    let mut cumulative_c = 0.0_f32;
+
+    for slot in out.iter_mut() {
+        // SortedUniforms always yields exactly `n` values.
+        let u = sorted.next().expect("SortedUniforms exhausted prematurely");
+        let target = total * u;
+        while target > cumulative {
+            j += 1;
+            kahan_add(&mut cumulative, &mut cumulative_c, weights[j]);
+        }
+        *slot = j as u32;
+    }
+}
+
+/// Buffered weighted resampler: same statistical contract and
+/// signature as [`resample_indices`], typically ~1.32× faster on
+/// x86 (more on hardware with a slow `powf`).
+///
+/// Generates sorted uniforms via the Gamma-ratio identity
+/// (`U_(i) = (E_1 + ... + E_i) / (E_1 + ... + E_(n+1))` for `E_j`
+/// iid Exp(1)) rather than via [`first_uniform`], avoiding the
+/// per-element `powf`. Internally repurposes `out` as scratch
+/// (each `u32` slot temporarily holds the f32 bit pattern of an
+/// Exp(1) draw via [`f32::to_bits`], later overwritten with the
+/// output index).
+///
+/// See `INTERNALS.md` §4.4 for the algorithm and §5.2 for the
+/// `target.min(total)` clip that keeps the merge bounded.
+///
+/// # Preconditions
+/// - `weights` is nonempty.
+/// - `weights.len()` ≤ `u32::MAX`.
+/// - All entries of `weights` are finite and nonnegative.
+/// - The sum of `weights` is strictly positive.
+///
+/// # Panics
+/// Panics if `weights.is_empty()`. Panics in debug if weights are
+/// non-finite/negative or sum to zero.
+pub fn resample_indices_buffered<R: Rng + ?Sized>(rng: &mut R, weights: &[f32], out: &mut [u32]) {
+    assert!(!weights.is_empty(), "weights must be nonempty");
+    debug_assert!(
+        weights.len() <= u32::MAX as usize,
+        "weights.len() must fit in u32"
+    );
+
+    if out.is_empty() {
+        return;
+    }
+
+    // Kahan-sum total weight; bit-for-bit reproducible against the
+    // merge's incremental walk below (Lemma 3, INTERNALS.md §5.2).
+    let mut total = 0.0_f32;
+    let mut total_c = 0.0_f32;
+    for &w in weights {
+        debug_assert!(w.is_finite() && w >= 0.0, "weight must be finite and ≥ 0");
+        kahan_add(&mut total, &mut total_c, w);
+    }
+    debug_assert!(total > 0.0, "total weight must be strictly positive");
+
+    // Phase 1: fill `out` with E_1..E_n, encoded as f32 bit patterns
+    // (each `u32` slot holds one Exp draw's bits exactly via
+    // f32::to_bits). Kahan-accumulate G including E_{n+1}. Storing
+    // E_{n+1} is unnecessary — we only need its contribution to G
+    // so that S_n / G < 1 strictly.
+    let mut g = 0.0_f32;
+    let mut g_c = 0.0_f32;
+    for slot in out.iter_mut() {
+        let e: f32 = Exp1.sample(rng);
+        *slot = e.to_bits();
+        kahan_add(&mut g, &mut g_c, e);
+    }
+    let e_extra: f32 = Exp1.sample(rng);
+    kahan_add(&mut g, &mut g_c, e_extra);
+
+    // Phase 2: walk `out` left-to-right. Each slot is read back as
+    // f32 (recovering the Exp draw stashed in Phase 1) then
+    // overwritten with its output index in the same iteration.
+    // cumulative_e accumulates S_i = E_1 + … + E_i (Kahan);
+    // u_i = S_i / G is the i-th sorted uniform. Merge against
+    // weights with Kahan on cumulative_w; the `target.min(total)`
+    // clip handles the rare f32 case where u_n rounds to 1.0
+    // exactly (INTERNALS.md §5.2).
+    let inv_g = 1.0 / g;
+    let mut cumulative_e = 0.0_f32;
+    let mut ce_c = 0.0_f32;
+    let mut j: usize = 0;
+    let mut cumulative_w = weights[0];
+    let mut cumulative_w_c = 0.0_f32;
+
+    for slot in out.iter_mut() {
+        let e = f32::from_bits(*slot);
+        kahan_add(&mut cumulative_e, &mut ce_c, e);
+
+        let u = cumulative_e * inv_g;
+        let target = (total * u).min(total);
+        while target > cumulative_w {
+            j += 1;
+            kahan_add(&mut cumulative_w, &mut cumulative_w_c, weights[j]);
+        }
+        *slot = j as u32;
+    }
+}
