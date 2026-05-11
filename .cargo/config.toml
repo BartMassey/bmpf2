@@ -1,0 +1,5 @@
+# Mirrors `Cargo.toml`'s `[package.metadata.docs.rs] rustdoc-args`
+# so local `cargo doc` renders math the same way docs.rs does.
+# Without this, $...$ in rustdoc shows as raw text locally.
+[build]
+rustdocflags = ["--html-in-header", "docs/katex.html"]

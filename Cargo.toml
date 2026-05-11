@@ -63,5 +63,12 @@ path = "src/lib.rs"
 # docs.rs builds the published crate with default features only by
 # default. Build with all features so users browsing the rendered
 # docs see both `std` and `libm` configurations documented.
+#
+# `--html-in-header docs/katex.html` injects a KaTeX bootstrap into
+# every page so $...$ / $$...$$ in rustdoc renders as math (the
+# library has enough Beta / order-statistic / Gamma-ratio formulae
+# to warrant it). For local `cargo doc`, the same flag is set in
+# `.cargo/config.toml`'s `rustdocflags`.
 [package.metadata.docs.rs]
 all-features = true
+rustdoc-args = ["--html-in-header", "docs/katex.html"]

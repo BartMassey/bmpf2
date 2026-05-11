@@ -1,0 +1,38 @@
+<!--
+    KaTeX header for rustdoc, injected via
+    `[package.metadata.docs.rs] rustdoc-args = ["--html-in-header", "docs/katex.html"]`
+    in Cargo.toml (used by docs.rs) and via `.cargo/config.toml`'s
+    `rustdocflags` (used by local `cargo doc`).
+
+    KaTeX is loaded from the jsdelivr CDN and auto-render scans every
+    docs page for `$...$` (inline) and `$$...$$` (display) delimiters
+    after page load. Math inside markdown code spans (backticks) is
+    left alone, so `Beta(1, k)` in a code span stays as text.
+
+    Subresource Integrity (SRI) hashes are KaTeX 0.16.11's official
+    values from https://katex.org/docs/browser.html. Pinned by version
+    in the URL too, so a CDN compromise can only force a load failure,
+    not silently swap in a different KaTeX.
+-->
+<link rel="stylesheet"
+      href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css"
+      integrity="sha384-nB0miv6/jRmo5UMMR1wu3Gz6NLsoTkbqJghGIsx//Rlm+ZU03BU6SQNC66uf4l5+"
+      crossorigin="anonymous">
+<script defer
+        src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"
+        integrity="sha384-7zkQWkzuo3B5mTepMUcHkMB5jZaolc2xDwL6VFqjFALcbeS9Ggm/0T2VmEp6ggif"
+        crossorigin="anonymous"></script>
+<script defer
+        src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js"
+        integrity="sha384-43gviWU0YVjaDtb/GhzOouOXtZMP/7XUzwPTstBeZFe/+rCMvRwr4yROQP43s0Xk"
+        crossorigin="anonymous"
+        onload="renderMathInElement(document.body, {
+            delimiters: [
+                {left: '$$', right: '$$', display: true},
+                {left: '$',  right: '$',  display: false},
+                {left: '\\[', right: '\\]', display: true},
+                {left: '\\(', right: '\\)', display: false}
+            ],
+            throwOnError: false,
+            ignoredTags: ['script', 'noscript', 'style', 'textarea', 'pre', 'code']
+        });"></script>
