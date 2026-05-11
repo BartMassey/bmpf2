@@ -11,7 +11,7 @@ weighted-sampling step at the heart of Bayesian particle filters
 and other sequential Monte Carlo methods. Given an array of `n`
 non-negative weights, draws `n` indices into the array, each chosen
 iid (so with replacement) with probability proportional to its
-weight, in O(n) time. Implements the algorithm of Massey
+weight, in $O(n)$ time. Implements the algorithm of Massey
 (ICASSP 2008).
 
 ## Quick start
@@ -67,18 +67,19 @@ sampling schemes used in particle filters — systematic, residual,
 stratified — produce a different joint distribution on the output
 multiset; this crate doesn't implement those.)
 
-When implemented naïvely, SIS takes O(n·m) time to produce n
-samples from m weights: the textbook inverse-CDF construction
-walks the weight array once per output, accumulating a prefix
-sum until it crosses a uniform threshold (an O(m) operation
-per sample on average).
+When implemented naïvely, SIS takes $O(n m)$ time to produce
+$n$ samples from $m$ weights: the textbook inverse-CDF
+construction walks the weight array once per output,
+accumulating a prefix sum until it crosses a uniform threshold
+(an $O(m)$ operation per sample on average).
 
 Precomputing the cumulative-weight array up front and binary-
-searching it brings the per-sample cost down to O(log m), for
-O(m + n log m) total. This crate runs in O(m + n) — using a
-trick due to Massey (2008): generate `n` sorted uniforms in
-`[0, 1)` in one O(n) pass, then merge them against the
-cumulative weight array in another O(m + n) pass.
+searching it brings the per-sample cost down to $O(\log m)$,
+for $O(m + n \log m)$ total. This crate runs in $O(m + n)$ —
+using a trick due to Massey (2008): generate $n$ sorted
+uniforms in $[0, 1)$ in one $O(n)$ pass, then merge them
+against the cumulative weight array in another $O(m + n)$
+pass.
 
 ## API
 
@@ -98,11 +99,11 @@ Two samplers are provided.
 
 These are built on two lower-level public primitives:
 
-- **`first_uniform(rng, k)`** — sample `min(U₁, ..., Uₖ)` for
-  Uk drawn iid from Uniform(0, 1). Constant time.
+- **`first_uniform(rng, k)`** — sample $\min(U_1, \ldots, U_k)$
+  for $U_k$ drawn iid from $\mathrm{Uniform}(0, 1)$. Constant time.
 
-- **`SortedUniforms::new(rng, n)`** — iterator yielding `n`
-  Uniform(0, 1) variates in ascending order in O(n) time.
+- **`SortedUniforms::new(rng, n)`** — iterator yielding $n$
+  $\mathrm{Uniform}(0, 1)$ variates in ascending order in $O(n)$ time.
   Uses `first_uniform()` internally, so constant-time per
   iteration.
 

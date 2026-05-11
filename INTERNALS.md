@@ -27,16 +27,17 @@ throughout, allocation-free, and `no_std`-compatible.
 
 ### 2.1. Problem statement
 
-Given a vector of `m` non-negative weights `w₁, ..., wₘ` with
-`T = Σⱼ wⱼ > 0`, and an output count `n`, produce a sequence
-`J₁ ≤ J₂ ≤ ... ≤ Jₙ` of indices into `weights` such that the joint
-distribution of `(J₁, ..., Jₙ)` is identical to that of
-`(K₍₁₎, ..., K₍ₙ₎)`, where `K₁, ..., Kₙ` are iid with
-`Pr[Kₐ = j] = wⱼ / T` and `K₍·₎` denotes their order statistics.
+Given a vector of $m$ non-negative weights $w_1, \ldots, w_m$ with
+$T = \sum_j w_j > 0$, and an output count $n$, produce a sequence
+$J_1 \le J_2 \le \cdots \le J_n$ of indices into `weights` such that
+the joint distribution of $(J_1, \ldots, J_n)$ is identical to that
+of $(K_{(1)}, \ldots, K_{(n)})$, where $K_1, \ldots, K_n$ are iid
+with $\Pr[K_a = j] = w_j / T$ and $K_{(\cdot)}$ denotes their order
+statistics.
 
-In other words: equivalent to taking n iid multinomial draws on the
-weight distribution and sorting them, but produced in a single O(m + n)
-pass.
+In other words: equivalent to taking $n$ iid multinomial draws on
+the weight distribution and sorting them, but produced in a single
+$O(m + n)$ pass.
 
 ### 2.2. Public API
 
@@ -61,10 +62,11 @@ identical on every platform (16-, 32-, or 64-bit `usize`).
 
 Plus two lower-level primitives:
 
-- `first_uniform(rng, k) -> f32` — samples `min(U₁, ..., Uₖ)` for
-  k iid Uniform(0, 1). Equivalently, samples `Beta(1, k)`.
-- `SortedUniforms::new(rng, n)` — an iterator yielding `n` Uniform(0, 1)
-  variates in ascending order.
+- `first_uniform(rng, k) -> f32` — samples
+  $\min(U_1, \ldots, U_k)$ for $k$ iid $\mathrm{Uniform}(0, 1)$.
+  Equivalently, samples $\mathrm{Beta}(1, k)$.
+- `SortedUniforms::new(rng, n)` — an iterator yielding $n$
+  $\mathrm{Uniform}(0, 1)$ variates in ascending order.
 
 ### 2.3. Preconditions
 
@@ -82,39 +84,43 @@ Note that the "memory-safe" guarantee rests on Lemma 3
 
 ### 3.1. The order-statistic recurrence
 
-The sorted uniforms `U₍₁₎ < U₍₂₎ < ... < U₍ₙ₎` of `n` iid
-Uniform(0, 1) draws can be generated sequentially in O(n) via the
-spacings recurrence (Bentley & Saxe 1980; Devroye 1986, §V.3.1). At
-step `i` with `last = U₍ᵢ₋₁₎`:
+The sorted uniforms $U_{(1)} < U_{(2)} < \cdots < U_{(n)}$ of $n$
+iid $\mathrm{Uniform}(0, 1)$ draws can be generated sequentially in
+$O(n)$ via the spacings recurrence (Bentley & Saxe 1980;
+Devroye 1986, §V.3.1). At step $i$ with $\mathrm{last} = U_{(i-1)}$:
 
-```
-spacing  ~  Beta(1, k)         where k = n − i + 1
-yield    =  last + (1 − last) · spacing
-```
+$$
+\mathrm{spacing} \sim \mathrm{Beta}(1, k), \qquad k = n - i + 1
+$$
+$$
+\mathrm{yield} = \mathrm{last} + (1 - \mathrm{last}) \cdot \mathrm{spacing}
+$$
 
-The conditional distribution of `U₍ᵢ₎` given `U₍ᵢ₋₁₎ = u` is the
-minimum of `n − i + 1` iid Uniform(u, 1) draws (Lemma 1, §5.1), and
-that minimum equals `u + (1 − u) · Z` where `Z` is the minimum of
-`n − i + 1` iid Uniform(0, 1) draws — i.e. `Z ~ Beta(1, k)`.
-[`SortedUniforms`] implements this recurrence; [`first_uniform`]
-samples `Z`.
+The conditional distribution of $U_{(i)}$ given
+$U_{(i-1)} = u$ is the minimum of $n - i + 1$ iid
+$\mathrm{Uniform}(u, 1)$ draws (Lemma 1, §5.1), and that minimum
+equals $u + (1 - u) \cdot Z$ where $Z$ is the minimum of
+$n - i + 1$ iid $\mathrm{Uniform}(0, 1)$ draws — i.e.
+$Z \sim \mathrm{Beta}(1, k)$. [`SortedUniforms`] implements this
+recurrence; [`first_uniform`] samples $Z$.
 
 ### 3.2. The merge
 
 Given sorted uniforms and a cumulative weight array
-`Wⱼ = w₁ + ... + wⱼ` (so `Wₘ = T`), the inverse-CDF construction of
-multinomial sampling (Theorem 2, §5.1) gives
+$W_j = w_1 + \cdots + w_j$ (so $W_m = T$), the inverse-CDF
+construction of multinomial sampling (Theorem 2, §5.1) gives
 
-```
-Jᵢ  =  min { j : T · U₍ᵢ₎ < Wⱼ }.
-```
+$$
+J_i = \min \{\, j : T \cdot U_{(i)} < W_j \,\}.
+$$
 
-Because `j ↦ Wⱼ` is monotone, the map `U ↦ J` is monotone non-
-decreasing; sorting the inputs gives sorted outputs. Implementation:
-walk the sorted uniforms left-to-right with a single advancing
-cursor `j`, maintaining `cumulative = Wⱼ` as a running prefix sum.
-For each yielded `U₍ᵢ₎`, advance `j` while `total · U₍ᵢ₎ > cumulative`,
-then record `Jᵢ = j`. Total work O(m + n) since each cursor advances
+Because $j \mapsto W_j$ is monotone, the map $U \mapsto J$ is
+monotone non-decreasing; sorting the inputs gives sorted outputs.
+Implementation: walk the sorted uniforms left-to-right with a single
+advancing cursor $j$, maintaining $\mathrm{cumulative} = W_j$ as a
+running prefix sum. For each yielded $U_{(i)}$, advance $j$ while
+$\mathrm{total} \cdot U_{(i)} > \mathrm{cumulative}$, then record
+$J_i = j$. Total work $O(m + n)$ since each cursor advances
 monotonically.
 
 ### 3.3. f32 throughout
@@ -129,16 +135,19 @@ not from extra precision.
 
 - **`sample_indices`** (streaming): generates each sorted uniform
   via [`SortedUniforms`] / [`first_uniform`] — one `powf` per output
-  index. No additional memory beyond `out`.
+  index. Returns an iterator; no additional memory.
 - **`sample_indices_buffered`** (buffered): uses a different
   sorted-uniforms generator — the Gamma-ratio identity
-  `U₍ᵢ₎ = (E₁ + ... + Eᵢ) / (E₁ + ... + Eₙ₊₁)` where `Eⱼ ~ Exp(1)`
-  iid. Trades one Exp(1) draw per output for the `powf`. On x86 with
-  a tuned libm this is ~1.3× faster per element; on Cortex-M4F where
+  $U_{(i)} = (E_1 + \cdots + E_i) / (E_1 + \cdots + E_{n+1})$
+  where $E_j \sim \mathrm{Exp}(1)$ iid. Trades one
+  $\mathrm{Exp}(1)$ draw per output for the `powf`. On x86 with a
+  tuned libm this is ~1.3× faster per element; on Cortex-M4F where
   scalar `powf` is much slower than an Exp Ziggurat, the gap widens.
 
-Identical signatures (no caller-supplied scratch); the buffered
-variant repurposes `out` as scratch via [`f32::to_bits`] (§4.5).
+The buffered variant repurposes the caller's `out` slice as f32
+scratch via [`f32::to_bits`] (§4.5), so it cannot expose an
+iterator; the streaming variant has no scratch to share and so is
+free to.
 
 ---
 
@@ -146,9 +155,9 @@ variant repurposes `out` as scratch via [`f32::to_bits`] (§4.5).
 
 ### 4.1. `first_uniform` — inverse CDF in f32
 
-The minimum of `k` iid Uniform(0, 1) draws has CDF
-`F(x) = 1 − (1 − x)^k` and inverse `F⁻¹(u) = 1 − (1 − u)^(1/k)`.
-Implementation:
+The minimum of $k$ iid $\mathrm{Uniform}(0, 1)$ draws has CDF
+$F(x) = 1 - (1 - x)^k$ and inverse
+$F^{-1}(u) = 1 - (1 - u)^{1/k}$. Implementation:
 
 ```rust
 let u: f32 = rng.gen();   // u ∈ [0, 1 − 2⁻²⁴]
@@ -156,19 +165,21 @@ let u: f32 = rng.gen();   // u ∈ [0, 1 − 2⁻²⁴]
 ```
 
 This form is preferred over the algebraically equivalent
-`1 − u^(1/k)` (from substituting `v = 1 − u`, also uniform) because
-it has better f32 boundary behavior. With `1 − u^(1/k)`, the input
-`u = 0` (which `rng.gen()` produces with probability 2⁻²⁴) yields
-`0^(1/k) = 0`, and the function returns 1 — outside the
-`[0, 1)` support, which would freeze the order-statistic recurrence
-at `last = 1`. Earlier versions guarded this with a redraw.
+$1 - u^{1/k}$ (from substituting $v = 1 - u$, also uniform)
+because it has better f32 boundary behavior. With $1 - u^{1/k}$,
+the input $u = 0$ (which `rng.gen()` produces with probability
+$2^{-24}$) yields $0^{1/k} = 0$, and the function returns 1 —
+outside the $[0, 1)$ support, which would freeze the order-
+statistic recurrence at $\mathrm{last} = 1$. Earlier versions
+guarded this with a redraw.
 
-The chosen form `1 − (1 − u)^(1/k)` is well-behaved with no special
-case: `1 − u` lands in `[2⁻²⁴, 1]` exactly representably in f32
-(since `1 − i · 2⁻²⁴` is f32-representable for `i = 0..2²⁴`), so
-`(1 − u)^(1/k) ∈ [2⁻²⁴ᐟᵏ, 1]` and the output is in
-`[0, 1 − 2⁻²⁴ᐟᵏ] ⊂ [0, 1)`. Each of the 2²⁴ input bins maps to a
-distinct output, all in range.
+The chosen form $1 - (1 - u)^{1/k}$ is well-behaved with no
+special case: $1 - u$ lands in $[2^{-24}, 1]$ exactly representably
+in f32 (since $1 - i \cdot 2^{-24}$ is f32-representable for
+$i = 0, \ldots, 2^{24}$), so
+$(1 - u)^{1/k} \in [2^{-24/k}, 1]$ and the output is in
+$[0, 1 - 2^{-24/k}] \subset [0, 1)$. Each of the $2^{24}$ input
+bins maps to a distinct output, all in range.
 
 There is one benign rounding artifact: for very large `k` and `u`
 near 0, `(1 − u)^(1/k)` can round to exactly 1 in f32, making the
@@ -347,90 +358,101 @@ statistician. Corrections welcome.)
 
 #### Lemma 1 (memorylessness of uniform order statistics)
 
-Let `U₁, ..., Uₙ` be iid Uniform(0, 1) and let
-`U₍₁₎ ≤ ... ≤ U₍ₙ₎` be their order statistics. For any
-1 ≤ i ≤ n − 1, conditional on `U₍ᵢ₎ = u`, the remaining order
-statistics `U₍ᵢ₊₁₎, ..., U₍ₙ₎` are jointly distributed as the order
-statistics of n − i iid Uniform(u, 1) variates.
+Let $U_1, \ldots, U_n$ be iid $\mathrm{Uniform}(0, 1)$ and let
+$U_{(1)} \le \cdots \le U_{(n)}$ be their order statistics. For any
+$1 \le i \le n - 1$, conditional on $U_{(i)} = u$, the remaining
+order statistics $U_{(i+1)}, \ldots, U_{(n)}$ are jointly
+distributed as the order statistics of $n - i$ iid
+$\mathrm{Uniform}(u, 1)$ variates.
 
 *Proof.* Standard property of order statistics from a continuous
 distribution; see Devroye (1986), §V.3, or David & Nagaraja (2003),
-§2.4. The key fact: conditional on `U₍ᵢ₎ = u`, the values `Uⱼ`
-exceeding `u` are iid Uniform(u, 1). ∎
+§2.4. The key fact: conditional on $U_{(i)} = u$, the values $U_j$
+exceeding $u$ are iid $\mathrm{Uniform}(u, 1)$. ∎
 
 #### Lemma 2 (minimum of k uniforms)
 
-If `V₁, ..., Vₖ` are iid Uniform(0, 1) then `min(V₁, ..., Vₖ)` has
-CDF `F(v) = 1 − (1 − v)ᵏ` on `[0, 1]` — i.e.
-`min(V₁, ..., Vₖ) ~ Beta(1, k)`.
+If $V_1, \ldots, V_k$ are iid $\mathrm{Uniform}(0, 1)$ then
+$\min(V_1, \ldots, V_k)$ has CDF $F(v) = 1 - (1 - v)^k$ on
+$[0, 1]$ — i.e. $\min(V_1, \ldots, V_k) \sim \mathrm{Beta}(1, k)$.
 
-*Proof.* `Pr[min Vᵢ > v] = Πᵢ Pr[Vᵢ > v] = (1 − v)ᵏ`. ∎
+*Proof.*
+$\Pr[\min_i V_i > v] = \prod_i \Pr[V_i > v] = (1 - v)^k$. ∎
 
 #### Theorem 1 (correctness of `SortedUniforms`)
 
 The iterator `SortedUniforms::new(rng, n)` yields a sequence of
-values distributed as the order statistics of n iid Uniform(0, 1)
-variates.
+values distributed as the order statistics of $n$ iid
+$\mathrm{Uniform}(0, 1)$ variates.
 
-*Proof.* By induction on `i ∈ {1, ..., n}`. Write `lastᵢ` for the
-internal `last` after the i-th yield, with `last₀ = 0`.
+*Proof.* By induction on $i \in \{1, \ldots, n\}$. Write
+$\mathrm{last}_i$ for the internal `last` after the $i$-th yield,
+with $\mathrm{last}_0 = 0$.
 
-*Base case (i = 1).* `remaining = n`, `last = 0`. Compute
-`spacing = first_uniform(rng, n)`, distributed as Beta(1, n) by
-construction; by Lemma 2 this is the distribution of the minimum
-of n iid Uniform(0, 1) — i.e. of `U₍₁₎`. Yield is
-`0 + 1 · spacing = spacing`, so `last₁ ~ U₍₁₎`. ✓
+*Base case* ($i = 1$). $\mathrm{remaining} = n$, $\mathrm{last} = 0$.
+Compute $\mathrm{spacing} = \mathtt{first\_uniform}(rng, n)$,
+distributed as $\mathrm{Beta}(1, n)$ by construction; by Lemma 2
+this is the distribution of the minimum of $n$ iid
+$\mathrm{Uniform}(0, 1)$ — i.e. of $U_{(1)}$. Yield is
+$0 + 1 \cdot \mathrm{spacing} = \mathrm{spacing}$, so
+$\mathrm{last}_1 \sim U_{(1)}$. ✓
 
-*Inductive step.* Assume `(last₁, ..., lastᵢ)` has the joint
-distribution of `(U₍₁₎, ..., U₍ᵢ₎)`. Now `remaining = n − i`,
-`spacing = first_uniform(rng, n − i) ~ Beta(1, n − i)`. By Lemma 1,
-conditional on `lastᵢ = u`, `U₍ᵢ₊₁₎` is the minimum of n − i iid
-Uniform(u, 1) draws, equal in distribution to
-`u + (1 − u) · min(W₁, ..., Wₙ₋ᵢ)` for `Wⱼ` iid Uniform(0, 1). By
-Lemma 2 the inner min is Beta(1, n − i), exactly the distribution
-of `spacing`. So `lastᵢ₊₁ = lastᵢ + (1 − lastᵢ) · spacing` has the
-correct conditional distribution given `lastᵢ`, extending the
-hypothesis to step i + 1. ∎
+*Inductive step.* Assume $(\mathrm{last}_1, \ldots, \mathrm{last}_i)$
+has the joint distribution of $(U_{(1)}, \ldots, U_{(i)})$. Now
+$\mathrm{remaining} = n - i$,
+$\mathrm{spacing} = \mathtt{first\_uniform}(rng, n - i) \sim
+\mathrm{Beta}(1, n - i)$. By Lemma 1, conditional on
+$\mathrm{last}_i = u$, $U_{(i+1)}$ is the minimum of $n - i$ iid
+$\mathrm{Uniform}(u, 1)$ draws, equal in distribution to
+$u + (1 - u) \cdot \min(W_1, \ldots, W_{n-i})$ for $W_j$ iid
+$\mathrm{Uniform}(0, 1)$. By Lemma 2 the inner min is
+$\mathrm{Beta}(1, n - i)$, exactly the distribution of
+$\mathrm{spacing}$. So
+$\mathrm{last}_{i+1} = \mathrm{last}_i + (1 - \mathrm{last}_i)
+\cdot \mathrm{spacing}$ has the correct conditional distribution
+given $\mathrm{last}_i$, extending the hypothesis to step $i + 1$. ∎
 
 #### Theorem 2 (correctness of `sample_indices`)
 
-Let `w₁, ..., wₘ ≥ 0` with `T = Σⱼ wⱼ > 0`. Define iid multinomial
-draws `K₁, ..., Kₙ` with `Pr[Kₐ = j] = wⱼ / T`. Then the output
-sequence `J₁ ≤ ... ≤ Jₙ` produced by
-`sample_indices(rng, weights, out)` (with `out.len() = n`) has
-the same joint distribution as the sorted multinomial sample
-`(K₍₁₎, ..., K₍ₙ₎)`. (1-indexed in this proof; the code is
-0-indexed.)
+Let $w_1, \ldots, w_m \ge 0$ with $T = \sum_j w_j > 0$. Define iid
+multinomial draws $K_1, \ldots, K_n$ with $\Pr[K_a = j] = w_j / T$.
+Then the output sequence $J_1 \le \cdots \le J_n$ produced by
+`sample_indices(rng, weights, n)` has the same joint distribution
+as the sorted multinomial sample $(K_{(1)}, \ldots, K_{(n)})$.
+(1-indexed in this proof; the code is 0-indexed.)
 
-*Proof.* Let `Wⱼ = w₁ + ... + wⱼ`, `F(j) = Wⱼ / T`. The inverse-CDF
-multinomial sampler draws `Uₐ ~ Uniform(0, 1)` and sets
+*Proof.* Let $W_j = w_1 + \cdots + w_j$, $F(j) = W_j / T$. The
+inverse-CDF multinomial sampler draws $U_a \sim
+\mathrm{Uniform}(0, 1)$ and sets
 
-```
-Kₐ = min { j : F(j) > Uₐ } = min { j : T · Uₐ < Wⱼ }.       (∗)
-```
+$$
+K_a = \min \{\, j : F(j) > U_a \,\} = \min \{\, j : T \cdot U_a < W_j \,\}. \quad (\ast)
+$$
 
-This is correct because `F(j − 1) ≤ Uₐ < F(j)` happens with
-probability `wⱼ / T`. The map `Uₐ ↦ Kₐ` is monotone non-decreasing,
-so sorting the `Uₐ` and applying (∗) yields the sorted multinomial
-sample:
+This is correct because $F(j - 1) \le U_a < F(j)$ happens with
+probability $w_j / T$. The map $U_a \mapsto K_a$ is monotone non-
+decreasing, so sorting the $U_a$ and applying $(\ast)$ yields the
+sorted multinomial sample:
 
 ```
 (K₍₁₎, ..., K₍ₙ₎) = (φ(U₍₁₎), ..., φ(U₍ₙ₎))                  (∗∗)
 ```
 
-where `φ(u) = min { j : T · u < Wⱼ }`. By Theorem 1, `sample_indices`
-yields `(U₍₁₎, ..., U₍ₙ₎)` distributed as the order statistics of n
-iid Uniform(0, 1). For each yielded `U₍ᵢ₎`, the merge sets
-`target = T · U₍ᵢ₎` and advances `j` until `target ≤ cumulative = Wⱼ`,
-giving
+where $\varphi(u) = \min \{\, j : T \cdot u < W_j \,\}$. By
+Theorem 1, `sample_indices` yields $(U_{(1)}, \ldots, U_{(n)})$
+distributed as the order statistics of $n$ iid
+$\mathrm{Uniform}(0, 1)$. For each yielded $U_{(i)}$, the merge sets
+$\mathrm{target} = T \cdot U_{(i)}$ and advances $j$ until
+$\mathrm{target} \le \mathrm{cumulative} = W_j$, giving
 
-```
-Jᵢ = min { j : Wⱼ ≥ T · U₍ᵢ₎ }.                              (∗∗∗)
-```
+$$
+J_i = \min \{\, j : W_j \ge T \cdot U_{(i)} \,\}. \quad (\ast{\ast}\ast)
+$$
 
-Predicates (∗) and (∗∗∗) differ only on the event `T · U = Wⱼ`,
-a measure-zero event under the continuous uniform distribution. So
-`Jᵢ = φ(U₍ᵢ₎)` almost surely, matching (∗∗). ∎
+Predicates $(\ast)$ and $(\ast{\ast}\ast)$ differ only on the event
+$T \cdot U = W_j$, a measure-zero event under the continuous
+uniform distribution. So $J_i = \varphi(U_{(i)})$ almost surely,
+matching $(\ast\ast)$. ∎
 
 ### 5.2. Lemma 3 (floating-point boundary)
 
