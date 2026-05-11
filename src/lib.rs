@@ -197,8 +197,9 @@ fn kahan_add(sum: &mut f32, c: &mut f32, x: f32) {
 /// - All entries of `weights` are finite and nonnegative.
 /// - The sum of `weights` is strictly positive.
 ///
-/// Violating any of these will panic in debug builds and produce
-/// undefined (but memory-safe) output in release.
+/// All four preconditions are checked in release builds (the
+/// per-element finiteness check is fast enough to leave on
+/// always — see INTERNALS.md §4.7).
 ///
 /// # See also
 /// [`sample_indices_buffered`] — same signature and statistical
@@ -206,11 +207,10 @@ fn kahan_add(sum: &mut f32, c: &mut f32, x: f32) {
 /// a slow `powf`).
 ///
 /// # Panics
-/// Panics in debug if preconditions are violated. Always panics if
-/// `weights.is_empty()`.
+/// Panics in release on any precondition violation.
 pub fn sample_indices<R: Rng + ?Sized>(rng: &mut R, weights: &[f32], out: &mut [u32]) {
     assert!(!weights.is_empty(), "weights must be nonempty");
-    debug_assert!(
+    assert!(
         weights.len() <= u32::MAX as usize,
         "weights.len() must fit in u32"
     );
@@ -226,10 +226,10 @@ pub fn sample_indices<R: Rng + ?Sized>(rng: &mut R, weights: &[f32], out: &mut [
     let mut total = 0.0_f32;
     let mut total_c = 0.0_f32;
     for &w in weights {
-        debug_assert!(w.is_finite() && w >= 0.0, "weight must be finite and ≥ 0");
+        assert!(w.is_finite() && w >= 0.0, "weight must be finite and ≥ 0");
         kahan_add(&mut total, &mut total_c, w);
     }
-    debug_assert!(total > 0.0, "total weight must be strictly positive");
+    assert!(total > 0.0, "total weight must be strictly positive");
 
     let n = out.len() as u32;
     let mut sorted = SortedUniforms::new(rng, n);
@@ -272,17 +272,13 @@ pub fn sample_indices<R: Rng + ?Sized>(rng: &mut R, weights: &[f32], out: &mut [
 /// `target.min(total)` clip that keeps the merge bounded.
 ///
 /// # Preconditions
-/// - `weights` is nonempty.
-/// - `weights.len()` ≤ `u32::MAX`.
-/// - All entries of `weights` are finite and nonnegative.
-/// - The sum of `weights` is strictly positive.
+/// Same as [`sample_indices`]; all four are checked in release.
 ///
 /// # Panics
-/// Panics if `weights.is_empty()`. Panics in debug if weights are
-/// non-finite/negative or sum to zero.
+/// Panics in release on any precondition violation.
 pub fn sample_indices_buffered<R: Rng + ?Sized>(rng: &mut R, weights: &[f32], out: &mut [u32]) {
     assert!(!weights.is_empty(), "weights must be nonempty");
-    debug_assert!(
+    assert!(
         weights.len() <= u32::MAX as usize,
         "weights.len() must fit in u32"
     );
@@ -296,10 +292,10 @@ pub fn sample_indices_buffered<R: Rng + ?Sized>(rng: &mut R, weights: &[f32], ou
     let mut total = 0.0_f32;
     let mut total_c = 0.0_f32;
     for &w in weights {
-        debug_assert!(w.is_finite() && w >= 0.0, "weight must be finite and ≥ 0");
+        assert!(w.is_finite() && w >= 0.0, "weight must be finite and ≥ 0");
         kahan_add(&mut total, &mut total_c, w);
     }
-    debug_assert!(total > 0.0, "total weight must be strictly positive");
+    assert!(total > 0.0, "total weight must be strictly positive");
 
     // Phase 1: fill `out` with E_1..E_n, encoded as f32 bit patterns
     // (each `u32` slot holds one Exp draw's bits exactly via

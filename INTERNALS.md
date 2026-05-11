@@ -283,6 +283,33 @@ increasing index order from `(sum, c) = (0, 0)`. Any change here —
 parallel reduce, different traversal, switching to a non-Kahan
 accumulator — would invalidate Lemma 3.
 
+### 4.7. Precondition checks in release builds
+
+All four preconditions (§2.3) are checked with `assert!` in
+release, not `debug_assert!`:
+
+1. `weights` nonempty — O(1).
+2. `weights.len() ≤ u32::MAX` — O(1).
+3. Each `weights[i]` finite and nonnegative — O(m), one extra
+   branch per element inside the `total` Kahan loop.
+4. `Σ weights > 0` — O(1) (a single comparison after the sum).
+
+Items 1, 2, 4 are clearly free. The interesting one is item 3:
+its cost is amortized into a loop that already does a Kahan add
+(four f32 ops per element). Microbenchmark on the host (m = n =
+10⁶, weights `1..=m`) shows the full pipeline shifting from
+15.0 ns/step to 15.3 ns/step (streaming) and 11.2 → 11.4 ns/step
+(buffered) — about 2% slowdown each, well under the 5% bar we
+set when deciding whether to keep this check release-on. We
+keep it on because the cost of *not* checking — silent garbage
+output from a stray NaN, or an out-of-bounds index from a
+negative weight that smuggles `cumulative_w` past `total` —
+is much worse than a couple of cycles per element on the cold
+prefix-sum loop.
+
+The merge loop itself does no such checks: it operates on
+`weights[j]` after we've already validated the slice once.
+
 ---
 
 ## 5. Validation & verification
