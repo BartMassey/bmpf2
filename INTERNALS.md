@@ -232,12 +232,30 @@ Note that this routine does *not* call `first_uniform` or use
 `SortedUniforms` — the Gamma-ratio identity gives sorted uniforms
 directly without `powf`.
 
-The `target.min(total)` clip handles the rare f32 case where
-`u_n = S_n / G` rounds up to exactly 1.0 (in f32 this happens when
-`E_{n+1}/G < 2⁻²⁵`, with probability ~3% at `n = 10⁶`). Without the
-clip, `target` could exceed `cumulative_w` at the right endpoint
-even though `u < 1` in exact arithmetic; with it, the merge loop is
-guaranteed to terminate within `weights.len()`.
+The `target.min(total)` clip is load-bearing for memory safety
+because of the multiply-by-inverse design choice (step 4 / step 5c).
+We compute `inv_g = 1.0 / G` once and then `u = cumulative_e *
+inv_g` per output, rather than `u = cumulative_e / G`. This saves
+one f32 division per element on the hot path, but introduces an
+asymmetry: while `cumulative_e ≤ G` strictly in exact arithmetic
+(both Kahan-summed in the same order, with `G` including the extra
+`E_{n+1} > 0`), in f32 the rounded inverse `inv_g` can sit slightly
+above `1/G`, and then `cumulative_e * inv_g` can round to a value
+just above 1.0 — namely `1.0 + 2⁻²³`, the next f32 above 1.0.
+Without the clip, `target = total * u` could then strictly exceed
+`cumulative_w = total` at the right endpoint, and the merge would
+advance `j` past `weights.len() - 1`.
+
+With the clip, `target ≤ total`, and Lemma 3 (§5.2) — which gives
+`cumulative_w == total` bit-for-bit at `j = m − 1` — keeps the
+merge inside the slice exactly as it does for the streaming
+variant.
+
+(An alternative that avoids the clip entirely would be to compute
+`u = cumulative_e / G` directly. The natural-bound argument from
+streaming then transfers verbatim. We don't take that route because
+the per-element division is measurably slower than multiply-by-
+precomputed-inverse on every CPU we care about.)
 
 ### 4.5. In-place scratch via `f32::to_bits` round-trip
 
