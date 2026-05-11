@@ -18,6 +18,11 @@ readme = "README.md"
 keywords = ["sampling", "resampling", "monte-carlo", "statistics", "no-std"]
 categories = ["mathematics", "no-std", "algorithms"]
 
+# Project-meta files that don't belong in the published tarball.
+# (cargo's auto-generated `Cargo.toml.orig` and `.cargo_vcs_info.json`
+# can't be excluded; everything else here is opt-out.)
+exclude = [".github/**"]
+
 [features]
 # Default: std. Library uses `f32::powf` (in `first_uniform`) and
 # `Exp1` Ziggurat sampling (in `resample_indices_buffered`); both need
