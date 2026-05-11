@@ -71,10 +71,11 @@ fn pipeline_streaming_fenced(bencher: Bencher, m: usize) {
     let mut out = vec![0u32; m];
     let n = m as u32;
     bencher.bench_local(|| {
-        for (slot, j) in black_box(&mut out)
-            .iter_mut()
-            .zip(sample_indices(black_box(&mut rng), black_box(&weights), black_box(n)))
-        {
+        for (slot, j) in black_box(&mut out).iter_mut().zip(sample_indices(
+            black_box(&mut rng),
+            black_box(&weights),
+            black_box(n),
+        )) {
             *slot = j;
         }
     });
@@ -102,7 +103,11 @@ fn pipeline_buffered_fenced(bencher: Bencher, m: usize) {
     let mut rng = SmallRng::seed_from_u64(0x1234);
     let mut out = vec![0u32; m];
     bencher.bench_local(|| {
-        sample_indices_buffered(black_box(&mut rng), black_box(&weights), black_box(&mut out));
+        sample_indices_buffered(
+            black_box(&mut rng),
+            black_box(&weights),
+            black_box(&mut out),
+        );
     });
 }
 
