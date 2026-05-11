@@ -1,4 +1,5 @@
 # `ltsis` — linear-time Sequential Importance Sampling primitives
+Bart Massey and Claude 2026
 
 [![Crates.io](https://img.shields.io/crates/v/ltsis.svg)](https://crates.io/crates/ltsis)
 [![Documentation](https://docs.rs/ltsis/badge.svg)](https://docs.rs/ltsis)
