@@ -672,81 +672,106 @@ rather than retuning the threshold.
 
 ### 5.5. Microbenchmark methodology
 
-Two benches with deliberately different fencing strategies.
+Benches live in `benches/bench.rs` and use [Divan](https://docs.rs/divan)
+(per-iteration timing, outlier rejection, tabular summary;
+`harness = false` in `Cargo.toml` so Divan supplies the test
+runner). Three bench groups, each parameterized by either $k$ or
+$m$:
 
-**`first_uniform` per-call (`bench_first_uniform`).** Each call is
-wrapped in `std::hint::black_box`, so LLVM cannot fuse consecutive
-iterations into a vectorized `powf` over a batch. This is what we
-want: `first_uniform` is invoked one-at-a-time inside the streaming
-sampler's spacings recurrence (each call's output feeds the next
-call's `last`), so the realistic deployment cost is *scalar*
-per-call. Cortex-M4F (and any other no-SIMD target) cannot
-vectorize anyway, so the scalar number is also the relevant one
-for the no_std target.
+**`first_uniform_per_call`** — one `first_uniform(rng, k)` call,
+wrapped in `divan::black_box` so LLVM cannot fuse consecutive
+iterations into a vectorized `powf` over a batch. The streaming
+sampler's spacings recurrence invokes `first_uniform` one-at-a-
+time (each call's output feeds the next call's `last`), so the
+realistic deployment cost *is* scalar per-call. The fence pins
+the measurement to that.
 
 This is purely about *cross-call* vectorization. The libm internal
 to a single `powf` call may itself use SIMD instructions to compute
 that one result faster — `black_box` does not (and cannot) defeat
 that, and we want the realistic per-call cost the libm delivers.
-The ~10 ns/call we measure on host x86 is exactly that.
+The ~10 ns/call measured on host x86 is exactly that.
 
-**Full sampling pipeline (`bench_sample`).** Fences are placed only
-at the *outer* API boundary (`black_box(&mut rng)`,
-`black_box(&weights)`, `black_box(&mut out)`); LLVM is free to
-optimize *inside* the sampler call. This is intentional. The
-buffered variant in particular has two flat passes over `out`
-(phase 1 Exp1 fill; phase 2 merge), and on hosts with SIMD we
-*want* those passes to autovectorize — that is exactly the
-deployment configuration we are measuring. The streaming variant
-cannot vectorize internally because of the spacings recurrence's
-data dependency, so it gets no benefit either way; the numbers
-reported in §6.2 reflect this asymmetry.
+**`pipeline_*_fenced`** — full sampler call with `black_box` only
+at the outer API boundary. LLVM is free to optimize *inside* the
+sampler. The buffered variant has two flat passes over `out`
+(phase 1 Exp1 fill; phase 2 merge), and on hosts with SIMD those
+passes do autovectorize — this is the realistic deployment number
+on host x86. The streaming variant has the spacings-recurrence
+data dependency and cannot vectorize internally, so its number
+is the same scalar cost you'd see at deployment regardless.
 
-(In short: per-call bench fences cross-iteration vectorization
+**`pipeline_*_unfenced`** — same calls, no fences anywhere. LLVM
+may additionally fuse work across iterations of the bench loop
+(constant-fold, hoist, etc.). Together with the fenced variant
+this brackets the realistic cost on host x86: the gap between
+`pipeline_buffered_fenced` and `pipeline_buffered_unfenced` is
+the upper bound on cross-call fusion benefit on this CPU. In
+practice the gap is small (the per-call work is too large for
+cross-iteration fusion to pay off) but having the bracket makes
+the claim auditable rather than asserted.
+
+(In short: the per-call bench fences cross-iteration vectorization
 because that vectorization isn't available at deployment; the
-pipeline bench does not fence internal vectorization because
-that vectorization *is* available at deployment.)
+fenced pipeline bench permits the internal vectorization that *is*
+available; the unfenced pipeline bench bounds the additional gain
+from inter-call fusion that almost certainly isn't.)
 
 ---
 
 ## 6. Performance
 
-### 6.1. `first_uniform` per-call cost (host x86, `black_box`-fenced)
+### 6.1. `first_uniform` per-call cost (host x86, fenced)
 
-| k | ns/sample |
+Median of Divan's per-iteration samples; `cargo bench`. Output
+column `median` from the `first_uniform_per_call` group.
+
+| k | median ns/call |
 |----|----|
-| 2  | 9.9 |
-| 5  | 10.1 |
-| 10 | 10.0 |
-| 50 | 10.1 |
-| 200 | 9.9 |
-| 1000 | 10.0 |
+| 5    | 9.8 |
+| 10   | 9.8 |
+| 50   | 9.8 |
+| 200  | 9.8 |
+| 1000 | 9.8 |
 
-Essentially flat in `k`. Dominated by the scalar `f32::powf` call;
+Essentially flat in $k$. Dominated by the scalar `f32::powf` call;
 the RNG (Xoshiro256++ in `SmallRng`) is sub-nanosecond per draw and
-contributes ~1 ns at most.
+contributes ~1 ns at most. (The first bench in a Divan run can
+show warmup-related jitter at the smallest $k$ — re-run if you
+care about that cell. The other cells are stable across runs.)
 
 ### 6.2. Full sampling pipeline
 
-`m = n`, weights `1..=m`, `f32`, all calls `black_box`-fenced,
-SmallRng (Xoshiro256++) seed-based. Run-to-run variance is ~3% on
-each cell.
+`m = n`, weights `1..=m`, `f32`, SmallRng (Xoshiro256++)
+seed-based. Median of Divan's per-iteration samples. ns/step is
+ns/call divided by $(m + n) = 2m$.
+
+**Fenced (API-boundary `black_box`, internal vectorization
+allowed) vs. unfenced (nothing fenced, cross-iteration fusion
+allowed):**
 
 ```
-    m = n     streaming                buffered              streaming
-              ns/call    ns/step       ns/call    ns/step    /buffered
-      100         2870     14.35          2161     10.81        1.33x
-     1000        29184     14.59         21862     10.93        1.33x
-    10000       284775     14.24        222624     11.13        1.28x
-   100000      2892905     14.46       2193198     10.97        1.32x
-  1000000     28895398     14.45      21832852     10.92        1.32x
+              streaming                       buffered
+    m = n     fenced ns/step  unfenced       fenced ns/step  unfenced     C/B (fenced)
+      100     14.97           15.72          11.72           10.97           1.28x
+     1000     14.82           15.51          11.58           10.98           1.28x
+    10000     14.55           15.20          11.41           10.95           1.28x
+   100000     14.43           15.05          10.87           10.83           1.33x
+  1000000     14.43           15.11          10.74           11.30           1.34x
 ```
 
-Linear scaling clean across five orders of magnitude. Per-step
-cost dominated by the `Beta(1, k)` draw (streaming) or the
-`Exp(1)` draw plus merge (buffered); cache effects don't
-materially degrade large-`m` performance because the weight array
+Linear scaling across five orders of magnitude in both modes.
+Per-step cost is dominated by the `Beta(1, k)` draw (streaming)
+or the `Exp(1)` draw plus merge (buffered); cache effects don't
+materially degrade large-$m$ performance because the weight array
 is touched in a single forward sweep.
+
+Fenced and unfenced numbers track each other within ~5% across
+all cells — at this granularity (one sampler call is ~1–10 ms of
+work for $m \ge 10^4$) cross-call fusion has nothing to amortize
+across, so the fenced number *is* the realistic deployment cost
+on this host. Internal autovectorization, by contrast, is real
+and is what gives the buffered variant its ~1.3× edge.
 
 ### 6.3. Cortex-M4F expectations
 

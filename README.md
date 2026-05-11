@@ -173,11 +173,11 @@ seeds fixed); methodology and threshold derivations are in
 cargo bench
 ```
 
-Builds with `harness = false` (so it's a regular `fn main()`, not
-the unstable `#[bench]` harness) and runs a hand-rolled
-`black_box`-fenced timing loop for `first_uniform` and the full
-sampling pipeline. See `INTERNALS.md` §5.5 for methodology and
-§6 for typical numbers.
+Uses [Divan](https://docs.rs/divan) (per-iteration timing,
+outlier rejection, tabular summary) for `first_uniform` per-call
+cost and for the full sampling pipeline in both `black_box`-
+fenced and unfenced modes. See `INTERNALS.md` §5.5 for
+methodology and §6 for typical numbers.
 
 ## Technical details
 

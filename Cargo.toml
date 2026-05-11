@@ -45,9 +45,13 @@ num-traits = { version = "0.2", default-features = false }
 rand = { version = "0.10", default-features = false }
 rand_distr = { version = "0.6", default-features = false }
 
-# Microbenchmark with a hand-rolled `fn main()` and our own timing
-# (`harness = false` disables the unstable `#[bench]` harness). Run
-# with `cargo bench`.
+[dev-dependencies]
+# Statistically-aware microbenchmark runner: per-iteration timing,
+# outlier rejection, tabular output. Used only by `benches/bench.rs`.
+divan = "0.1"
+
+# `harness = false` lets divan supply its own `fn main()` via
+# `divan::main()` instead of the unstable `#[bench]` harness.
 [[bench]]
 name = "bench"
 harness = false
