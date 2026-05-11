@@ -547,19 +547,40 @@ development.
 
 ### 5.5. Microbenchmark methodology
 
-Per-call measurements wrap each call in `std::hint::black_box` to
-defeat cross-iteration LLVM autovectorization. A naive loop on x86
-with a SIMD libm would let LLVM emit a vectorized `powf` over runs
-of consecutive iterations — measuring batched throughput rather
-than scalar per-call cost. On Cortex-M4F (and any other no-SIMD
-target) batched throughput is unattainable, so scalar per-call
-cost is the relevant number. The fences pin the measurement to
-that.
+Two benches with deliberately different fencing strategies.
 
-Note that *internal* libm SIMD use (using SIMD instructions
-to compute one scalar `powf` more quickly) is unaffected by
-`black_box`. The 9 ns/call we measure on x86 is the genuine
-cost of one scalar `f32::powf` on the host's libm.
+**`first_uniform` per-call (`bench_first_uniform`).** Each call is
+wrapped in `std::hint::black_box`, so LLVM cannot fuse consecutive
+iterations into a vectorized `powf` over a batch. This is what we
+want: `first_uniform` is invoked one-at-a-time inside the streaming
+sampler's spacings recurrence (each call's output feeds the next
+call's `last`), so the realistic deployment cost is *scalar*
+per-call. Cortex-M4F (and any other no-SIMD target) cannot
+vectorize anyway, so the scalar number is also the relevant one
+for the no_std target.
+
+This is purely about *cross-call* vectorization. The libm internal
+to a single `powf` call may itself use SIMD instructions to compute
+that one result faster — `black_box` does not (and cannot) defeat
+that, and we want the realistic per-call cost the libm delivers.
+The ~10 ns/call we measure on host x86 is exactly that.
+
+**Full sampling pipeline (`bench_sample`).** Fences are placed only
+at the *outer* API boundary (`black_box(&mut rng)`,
+`black_box(&weights)`, `black_box(&mut out)`); LLVM is free to
+optimize *inside* the sampler call. This is intentional. The
+buffered variant in particular has two flat passes over `out`
+(phase 1 Exp1 fill; phase 2 merge), and on hosts with SIMD we
+*want* those passes to autovectorize — that is exactly the
+deployment configuration we are measuring. The streaming variant
+cannot vectorize internally because of the spacings recurrence's
+data dependency, so it gets no benefit either way; the numbers
+reported in §6.2 reflect this asymmetry.
+
+(In short: per-call bench fences cross-iteration vectorization
+because that vectorization isn't available at deployment; the
+pipeline bench does not fence internal vectorization because
+that vectorization *is* available at deployment.)
 
 ---
 
