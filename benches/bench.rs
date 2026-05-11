@@ -61,16 +61,24 @@ fn bench_sample() {
 
         // Streaming.
         let mut rng_c = SmallRng::seed_from_u64(0x1234);
+        let n_u32 = n as u32;
         for _ in 0..3 {
-            sample_indices(&mut rng_c, &weights, &mut out);
+            for (slot, j) in out.iter_mut().zip(sample_indices(&mut rng_c, &weights, n_u32)) {
+                *slot = j;
+            }
         }
         let t0 = Instant::now();
         for _ in 0..n_runs {
-            sample_indices(
-                black_box(&mut rng_c),
-                black_box(&weights),
-                black_box(&mut out),
-            );
+            for (slot, j) in black_box(&mut out)
+                .iter_mut()
+                .zip(sample_indices(
+                    black_box(&mut rng_c),
+                    black_box(&weights),
+                    black_box(n_u32),
+                ))
+            {
+                *slot = j;
+            }
         }
         let elapsed_c = t0.elapsed();
         let ns_call_c = elapsed_c.as_nanos() as f64 / n_runs as f64;

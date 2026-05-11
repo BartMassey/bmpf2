@@ -14,8 +14,7 @@ fn main() {
     let weights = vec![1.0_f32, 3.0, 2.0, 4.0];
 
     // Sample 1000 indices from this distribution.
-    let mut out = vec![0_u32; 1000];
-    sample_indices(&mut rng, &weights, &mut out);
+    let out: Vec<u32> = sample_indices(&mut rng, &weights, 1000).collect();
 
     // Tally how often each index appears.
     let mut counts = vec![0_u32; weights.len()];

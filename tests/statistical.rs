@@ -388,7 +388,12 @@ where
 
 #[test]
 fn sample_marginals_streaming() {
-    sample_marginals("streaming", sample_indices);
+    sample_marginals("streaming", |rng, w, buf| {
+        let n = buf.len() as u32;
+        for (slot, j) in buf.iter_mut().zip(sample_indices(rng, w, n)) {
+            *slot = j;
+        }
+    });
 }
 
 #[test]
@@ -463,7 +468,12 @@ where
 
 #[test]
 fn sample_vs_multinomial_streaming() {
-    sample_vs_multinomial("streaming", sample_indices);
+    sample_vs_multinomial("streaming", |rng, w, buf| {
+        let n = buf.len() as u32;
+        for (slot, j) in buf.iter_mut().zip(sample_indices(rng, w, n)) {
+            *slot = j;
+        }
+    });
 }
 
 #[test]

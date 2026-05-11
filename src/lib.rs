@@ -7,13 +7,14 @@
 //!
 //! # API at a glance
 //!
-//! - [`sample_indices`] — the main entry point. Draws `out.len()`
-//!   indices into `weights` iid with replacement, each with
-//!   probability proportional to its weight. Output is in ascending
-//!   order. Streaming: one `powf` call per output index.
-//! - [`sample_indices_buffered`] — same signature and statistical
-//!   contract, typically ~1.32× faster on x86 (more on hardware with
-//!   a slow `powf`).
+//! - [`sample_indices`] — the main entry point. Returns an iterator
+//!   yielding `n` indices into `weights` iid with replacement, each
+//!   with probability proportional to its weight. Output is in
+//!   ascending order. Streaming: one `powf` call per yielded index.
+//! - [`sample_indices_buffered`] — buffered variant, typically
+//!   ~1.32× faster on x86 (more on hardware with a slow `powf`).
+//!   Takes an `&mut [u32]` buffer rather than returning an iterator
+//!   (it uses the buffer as f32 scratch).
 //! - [`SortedUniforms`] — iterator yielding `n` Uniform(0, 1) variates
 //!   in ascending order in O(n) time. Useful in its own right outside
 //!   sampling (e.g. inverse-CDF sampling where you want sorted
@@ -22,16 +23,17 @@
 //!   [`SortedUniforms`]. Samples the minimum of `k` iid Uniform(0, 1)
 //!   draws (≡ `Beta(1, k)`). Most callers won't touch this directly.
 //!
-//! Indices are written as `u32`, not `usize`, so the API has the same
-//! layout on every platform. Callers cast to `usize` to use them as
-//! slice indices: `particles[out[i] as usize]`.
+//! Indices are yielded/written as `u32`, not `usize`, so the API has
+//! the same layout on every platform. Callers cast to `usize` at the
+//! index site: `particles[j as usize]`.
 //!
 //! # `no_std` support
 //!
-//! The library compiles in `no_std` mode and performs no allocation
-//! — it operates over caller-supplied slices (`&[f32]` for weights,
-//! `&mut [u32]` for output). Two mutually exclusive math-source
-//! features:
+//! The library compiles in `no_std` mode and performs no allocation.
+//! [`sample_indices`] returns an iterator that the caller drives
+//! (typically yielding into a caller-owned buffer); the buffered
+//! variant operates entirely on a caller-supplied `&mut [u32]`.
+//! Two mutually exclusive math-source features:
 //!
 //! - `std` (default): use std's inherent `f32::powf`.
 //! - `libm`: use the [`libm`] crate via [`num_traits`] for `powf`.
@@ -182,14 +184,15 @@ fn kahan_add(sum: &mut f32, c: &mut f32, x: f32) {
     *sum = t;
 }
 
-/// Sample `out.len()` indices from `weights`, with each index
+/// Build an iterator yielding `n` indices into `weights`, each
 /// drawn iid (with replacement) with probability proportional to
-/// its weight ("multinomial sampling"). Output is in ascending
-/// order; permute `out` afterward if you need it shuffled.
+/// its weight ("multinomial sampling"). Indices are yielded in
+/// ascending order; collect into a `Vec` and shuffle afterward if
+/// you need them in random order.
 ///
-/// Streaming variant: runs in O(`weights.len()` + `out.len()`)
-/// time, allocates nothing, and uses one [`first_uniform`]
-/// call (one `powf`) per output index.
+/// Streaming variant: runs in O(`weights.len()` + `n`) total,
+/// allocates nothing, and uses one [`first_uniform`] call (one
+/// `powf`) per yielded index.
 ///
 /// # Preconditions
 /// - `weights` is nonempty.
@@ -197,29 +200,32 @@ fn kahan_add(sum: &mut f32, c: &mut f32, x: f32) {
 /// - All entries of `weights` are finite and nonnegative.
 /// - The sum of `weights` is strictly positive.
 ///
-/// All four preconditions are checked in release builds (the
-/// per-element finiteness check is fast enough to leave on
-/// always — see INTERNALS.md §4.7).
+/// All four preconditions are checked in release builds at
+/// constructor time (the per-element finiteness check is fast
+/// enough to leave on always — see INTERNALS.md §4.7).
 ///
 /// # See also
-/// [`sample_indices_buffered`] — same signature and statistical
-/// contract, typically ~1.32× faster on x86 (more on hardware with
-/// a slow `powf`).
+/// [`sample_indices_buffered`] — buffered variant, typically
+/// ~1.32× faster on x86 (more on hardware with a slow `powf`).
+/// Takes an `&mut [u32]` buffer rather than returning an iterator
+/// because it uses the buffer's slots as f32 scratch.
 ///
 /// # Panics
-/// Panics in release on any precondition violation.
-pub fn sample_indices<R: Rng + ?Sized>(rng: &mut R, weights: &[f32], out: &mut [u32]) {
+/// Panics on any precondition violation. (Lazy iterator semantics
+/// do *not* apply to validation: checks happen up-front so the
+/// caller learns of bad inputs immediately.)
+pub fn sample_indices<'a, R: Rng + ?Sized>(
+    rng: &'a mut R,
+    weights: &'a [f32],
+    n: u32,
+) -> SampleIndices<'a, R> {
     assert!(!weights.is_empty(), "weights must be nonempty");
     assert!(
         weights.len() <= u32::MAX as usize,
         "weights.len() must fit in u32"
     );
 
-    if out.is_empty() {
-        return;
-    }
-
-    // Kahan-sum total weight in index order. The merge below re-walks
+    // Kahan-sum total weight in index order. The merge re-walks
     // `weights` in the same index order with its own Kahan accumulator,
     // so by the time it consumes all weights its state matches `total`
     // bit-for-bit — load-bearing for Lemma 3 (INTERNALS.md §5.2).
@@ -231,30 +237,61 @@ pub fn sample_indices<R: Rng + ?Sized>(rng: &mut R, weights: &[f32], out: &mut [
     }
     assert!(total > 0.0, "total weight must be strictly positive");
 
-    let n = out.len() as u32;
-    let mut sorted = SortedUniforms::new(rng, n);
-
-    // Streaming merge. `j` advances monotonically through `weights`;
-    // `(cumulative, cumulative_c)` is the Kahan state for
-    // `w_0 + ... + w_j`. Initialized as if we'd just Kahan-added
-    // weights[0] to (0, 0): that step yields (weights[0], 0). `j`
-    // stays `usize` for slice indexing and is cast to `u32` on
-    // store (lossless under the precondition above).
-    let mut j: usize = 0;
-    let mut cumulative = weights[0];
-    let mut cumulative_c = 0.0_f32;
-
-    for slot in out.iter_mut() {
-        // SortedUniforms always yields exactly `n` values.
-        let u = sorted.next().expect("SortedUniforms exhausted prematurely");
-        let target = total * u;
-        while target > cumulative {
-            j += 1;
-            kahan_add(&mut cumulative, &mut cumulative_c, weights[j]);
-        }
-        *slot = j as u32;
+    SampleIndices {
+        sorted: SortedUniforms::new(rng, n),
+        weights,
+        total,
+        // Streaming merge state. `j` advances monotonically through
+        // `weights`; `(cumulative, cumulative_c)` is the Kahan state
+        // for `w_0 + ... + w_j`. Initialized as if we'd just Kahan-
+        // added weights[0] to (0, 0): that step yields (weights[0], 0).
+        j: 0,
+        cumulative: weights[0],
+        cumulative_c: 0.0,
     }
 }
+
+/// Iterator returned by [`sample_indices`]. Yields `n` `u32`
+/// indices into the original `weights` slice, in ascending order.
+///
+/// Implements [`ExactSizeIterator`] (the remaining count is exact)
+/// and [`FusedIterator`] (returns `None` forever after exhaustion).
+pub struct SampleIndices<'a, R: Rng + ?Sized> {
+    sorted: SortedUniforms<'a, R>,
+    weights: &'a [f32],
+    total: f32,
+    j: usize,
+    cumulative: f32,
+    cumulative_c: f32,
+}
+
+impl<'a, R: Rng + ?Sized> Iterator for SampleIndices<'a, R> {
+    type Item = u32;
+
+    #[inline]
+    fn next(&mut self) -> Option<u32> {
+        let u = self.sorted.next()?;
+        let target = self.total * u;
+        // `j` stays `usize` for slice indexing and is cast to `u32`
+        // on yield (lossless under the length precondition).
+        while target > self.cumulative {
+            self.j += 1;
+            kahan_add(
+                &mut self.cumulative,
+                &mut self.cumulative_c,
+                self.weights[self.j],
+            );
+        }
+        Some(self.j as u32)
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.sorted.size_hint()
+    }
+}
+
+impl<'a, R: Rng + ?Sized> ExactSizeIterator for SampleIndices<'a, R> {}
+impl<'a, R: Rng + ?Sized> FusedIterator for SampleIndices<'a, R> {}
 
 /// Buffered weighted sampler: same statistical contract and
 /// signature as [`sample_indices`], typically ~1.32× faster on

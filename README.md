@@ -25,15 +25,16 @@ let mut rng = rand::rngs::SmallRng::seed_from_u64(42);
 // Some weighted population. Weights need not be normalized.
 let weights = vec![1.0_f32, 3.0, 2.0, 4.0];
 
-// Sample 1000 indices from this distribution.
-let mut out = vec![0_u32; 1000];
-sample_indices(&mut rng, &weights, &mut out);
+// `sample_indices` returns an iterator yielding 1000 indices.
+// Collect, fold into your own buffer, or consume in a loop.
+let out: Vec<u32> = sample_indices(&mut rng, &weights, 1000).collect();
 
-// `out[i]` ∈ {0, 1, 2, 3}; index 3 (weight 4.0) appears about 4×
-// as often as index 0 (weight 1.0). Output is in ascending order.
+// Each yielded index ∈ {0, 1, 2, 3}; index 3 (weight 4.0) appears
+// about 4× as often as index 0 (weight 1.0). Indices are yielded
+// in ascending order.
 //
-// To use an output index for slice indexing, cast to usize:
-//   let particle = particles[out[i] as usize];
+// To use a yielded index for slice indexing, cast to usize:
+//   let particle = particles[j as usize];
 ```
 
 ## Background: Sequential Importance Sampling
@@ -83,13 +84,16 @@ cumulative weight array in another O(m + n) pass.
 
 Two samplers are provided.
 
-- **`sample_indices(rng, weights, out)`** — streaming. One `powf`
-  call per output index.
+- **`sample_indices(rng, weights, n) -> impl Iterator<Item = u32>`**
+  — streaming. Returns an iterator yielding `n` indices in
+  ascending order. One `powf` call per yielded index. No
+  allocation.
 
-- **`sample_indices_buffered(rng, weights, out)`** — buffered.
+- **`sample_indices_buffered(rng, weights, &mut out)`** — buffered.
   Generates sorted uniforms via Gamma ratios (Exp(1) draws) rather
   than `powf`. Typically ~1.3× faster on x86; more on hardware
-  with a slow `powf`. Internally repurposes the `out` slice as
+  with a slow `powf`. Takes an `&mut [u32]` rather than returning
+  an iterator because it repurposes the buffer's slots as f32
   scratch.
 
 These are built on two lower-level public primitives:

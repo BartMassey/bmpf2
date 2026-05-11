@@ -40,16 +40,24 @@ pass.
 
 ### 2.2. Public API
 
-Two functions with identical signatures:
+Two functions, deliberately not symmetric:
 
 ```rust
-fn sample_indices         (rng: &mut impl Rng, weights: &[f32], out: &mut [u32]);
-fn sample_indices_buffered(rng: &mut impl Rng, weights: &[f32], out: &mut [u32]);
+fn sample_indices<'a, R>(rng: &'a mut R, weights: &'a [f32], n: u32)
+    -> SampleIndices<'a, R>;                   // yields n × u32
+
+fn sample_indices_buffered(rng: &mut impl Rng,
+                           weights: &[f32],
+                           out: &mut [u32]);
 ```
 
-Both write `out.len()` indices into `out`. Indices are `u32` rather
-than `usize` so the on-disk layout is identical on every platform
-(16-, 32-, or 64-bit `usize`).
+`sample_indices` returns an iterator that yields `n` `u32` indices
+in ascending order. The buffered variant takes an `&mut [u32]`
+instead — it uses each output slot as f32 scratch (via
+`f32::to_bits`/`from_bits`, see §4.5), so it cannot be lazy.
+
+Indices are `u32` rather than `usize` so the on-disk layout is
+identical on every platform (16-, 32-, or 64-bit `usize`).
 
 Plus two lower-level primitives:
 
