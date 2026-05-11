@@ -11,7 +11,7 @@ similar primitives in other crates.
 
 ## 1. Abstract
 
-`ltsis` exposes O(n) primitives for **multinomial resampling** —
+`ltsis` exposes O(n) primitives for **multinomial sampling** —
 i.e. drawing n iid samples with replacement from a discrete weight
 distribution. The construction combines the classical Bentley–Saxe
 spacings recurrence for sorted uniforms with the merge-against-cumulative-
@@ -43,8 +43,8 @@ pass.
 Two functions with identical signatures:
 
 ```rust
-fn resample_indices         (rng: &mut impl Rng, weights: &[f32], out: &mut [u32]);
-fn resample_indices_buffered(rng: &mut impl Rng, weights: &[f32], out: &mut [u32]);
+fn sample_indices         (rng: &mut impl Rng, weights: &[f32], out: &mut [u32]);
+fn sample_indices_buffered(rng: &mut impl Rng, weights: &[f32], out: &mut [u32]);
 ```
 
 Both write `out.len()` indices into `out`. Indices are `u32` rather
@@ -119,10 +119,10 @@ not from extra precision.
 
 ### 3.4. Two variants
 
-- **`resample_indices`** (streaming): generates each sorted uniform
+- **`sample_indices`** (streaming): generates each sorted uniform
   via [`SortedUniforms`] / [`first_uniform`] — one `powf` per output
   index. No additional memory beyond `out`.
-- **`resample_indices_buffered`** (buffered): uses a different
+- **`sample_indices_buffered`** (buffered): uses a different
   sorted-uniforms generator — the Gamma-ratio identity
   `U₍ᵢ₎ = (E₁ + ... + Eᵢ) / (E₁ + ... + Eₙ₊₁)` where `Eⱼ ~ Exp(1)`
   iid. Trades one Exp(1) draw per output for the `powf`. On x86 with
@@ -184,7 +184,7 @@ Implements `Iterator`, `ExactSizeIterator` (`size_hint` returns
 overridden to return `remaining as usize` directly without
 exhausting the RNG.
 
-### 4.3. `resample_indices` (streaming)
+### 4.3. `sample_indices` (streaming)
 
 ```
 1. Kahan-sum `total = Σ weights`.
@@ -201,7 +201,7 @@ from `(0, 0)`). The `total` walk and the merge's `cumulative` walk
 are both Kahan sums of `weights` in index order from `(sum, c) = (0, 0)`,
 so they end bit-for-bit equal — a precondition of Lemma 3.
 
-### 4.4. `resample_indices_buffered` (buffered)
+### 4.4. `sample_indices_buffered` (buffered)
 
 ```
 1. Kahan-sum `total = Σ weights`.
@@ -272,9 +272,9 @@ effectively constant in `n`.
 
 Accumulators using Kahan:
 - `total = Σ weights` and the merge's incremental `cumulative_w`
-  in both `resample_indices` and `resample_indices_buffered`.
+  in both `sample_indices` and `sample_indices_buffered`.
 - `G = Σ Eᵢ` and the merge's `cumulative_e = Sᵢ` in
-  `resample_indices_buffered`.
+  `sample_indices_buffered`.
 
 The bit-for-bit identity used in Lemma 3 depends on both the
 up-front `total` walk and the merge's `cumulative_w` walk using the
@@ -339,12 +339,12 @@ of `spacing`. So `lastᵢ₊₁ = lastᵢ + (1 − lastᵢ) · spacing` has the
 correct conditional distribution given `lastᵢ`, extending the
 hypothesis to step i + 1. ∎
 
-#### Theorem 2 (correctness of `resample_indices`)
+#### Theorem 2 (correctness of `sample_indices`)
 
 Let `w₁, ..., wₘ ≥ 0` with `T = Σⱼ wⱼ > 0`. Define iid multinomial
 draws `K₁, ..., Kₙ` with `Pr[Kₐ = j] = wⱼ / T`. Then the output
 sequence `J₁ ≤ ... ≤ Jₙ` produced by
-`resample_indices(rng, weights, out)` (with `out.len() = n`) has
+`sample_indices(rng, weights, out)` (with `out.len() = n`) has
 the same joint distribution as the sorted multinomial sample
 `(K₍₁₎, ..., K₍ₙ₎)`. (1-indexed in this proof; the code is
 0-indexed.)
@@ -365,7 +365,7 @@ sample:
 (K₍₁₎, ..., K₍ₙ₎) = (φ(U₍₁₎), ..., φ(U₍ₙ₎))                  (∗∗)
 ```
 
-where `φ(u) = min { j : T · u < Wⱼ }`. By Theorem 1, `resample_indices`
+where `φ(u) = min { j : T · u < Wⱼ }`. By Theorem 1, `sample_indices`
 yields `(U₍₁₎, ..., U₍ₙ₎)` distributed as the order statistics of n
 iid Uniform(0, 1). For each yielded `U₍ᵢ₎`, the merge sets
 `target = T · U₍ᵢ₎` and advances `j` until `target ≤ cumulative = Wⱼ`,
@@ -382,7 +382,7 @@ a measure-zero event under the continuous uniform distribution. So
 ### 5.2. Lemma 3 (floating-point boundary)
 
 Suppose `weights[i]` are finite and non-negative with positive sum.
-Then `resample_indices` cannot index past `weights.len() − 1`
+Then `sample_indices` cannot index past `weights.len() − 1`
 regardless of values yielded by `SortedUniforms`, provided those
 values lie in `[0, 1]`.
 
@@ -471,15 +471,15 @@ reserves `~1e-10` and each sub-check inside a test reserves
    `7.5σ` (covers `n` up to 100 positions per test).
 6. **Pooled sorted-uniforms KS** (`sorted_uniforms_pooled_ks`):
    pooled output vs. uniform CDF, `c = 3.7`.
-7. **Resampler marginal χ²** (`resample_marginals_streaming` and
-   `resample_marginals_buffered`): per-index frequency under each
-   resampler matches the weight-proportional probabilities, four
+7. **Sampler marginal χ²** (`sample_marginals_streaming` and
+   `sample_marginals_buffered`): per-index frequency under each
+   sampler matches the weight-proportional probabilities, four
    weight cases (uniform, decreasing, peaky, with-zeros).
    Wilson–Hilferty z = 7.0.
-8. **Resampler vs. naive multinomial χ²**
-   (`resample_vs_multinomial_streaming` and
-   `resample_vs_multinomial_buffered`): two-sample chi-squared on
-   index-count vectors comparing each resampler against an
+8. **Sampler vs. naive multinomial χ²**
+   (`sample_vs_multinomial_streaming` and
+   `sample_vs_multinomial_buffered`): two-sample chi-squared on
+   index-count vectors comparing each sampler against an
    O(m + n log m) inverse-CDF naive multinomial reference (run in
    f64 internally so the reference has no prefix-sum noise of its
    own). Wilson–Hilferty z = 7.0.
@@ -527,7 +527,7 @@ Essentially flat in `k`. Dominated by the scalar `f32::powf` call;
 the RNG (Xoshiro256++ in `SmallRng`) is sub-nanosecond per draw and
 contributes ~1 ns at most.
 
-### 6.2. Full resampling pipeline
+### 6.2. Full sampling pipeline
 
 `m = n`, weights `1..=m`, `f32`, all calls `black_box`-fenced,
 SmallRng (Xoshiro256++) seed-based. Run-to-run variance is ~3% on

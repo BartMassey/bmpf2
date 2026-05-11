@@ -6,8 +6,8 @@
 [![License: MIT OR Apache-2.0](https://img.shields.io/crates/l/ltsis.svg)](#license)
 
 A Rust library for **Sequential Importance Sampling (SIS) with
-replacement** — also known as **multinomial resampling** — the
-weighted-resampling step at the heart of Bayesian particle filters
+replacement** — also known as **multinomial sampling** — the
+weighted-sampling step at the heart of Bayesian particle filters
 and other sequential Monte Carlo methods. Given an array of `n`
 non-negative weights, draws `n` indices into the array, each chosen
 iid (so with replacement) with probability proportional to its
@@ -17,7 +17,7 @@ weight, in O(n) time. Implements the algorithm of Massey
 ## Quick start
 
 ```rust
-use ltsis::resample_indices;
+use ltsis::sample_indices;
 use rand::SeedableRng;
 
 let mut rng = rand::rngs::SmallRng::seed_from_u64(42);
@@ -25,9 +25,9 @@ let mut rng = rand::rngs::SmallRng::seed_from_u64(42);
 // Some weighted population. Weights need not be normalized.
 let weights = vec![1.0_f32, 3.0, 2.0, 4.0];
 
-// Resample 1000 indices from this distribution.
+// Sample 1000 indices from this distribution.
 let mut out = vec![0_u32; 1000];
-resample_indices(&mut rng, &weights, &mut out);
+sample_indices(&mut rng, &weights, &mut out);
 
 // `out[i]` ∈ {0, 1, 2, 3}; index 3 (weight 4.0) appears about 4×
 // as often as index 0 (weight 1.0). Output is in ascending order.
@@ -50,7 +50,7 @@ population of `n` candidate states ("particles"), each with
 a weight that reflects how plausible that state is given the
 data observed so far. As more data arrives, the weights
 skew: most of the population ends up with negligible weight,
-while a handful of particles dominate. **Resampling**
+while a handful of particles dominate. **Sampling**
 refreshes the population by drawing `n` new particles — each
 a copy of one of the old ones, **with replacement** — where
 each old particle's chance of being copied is proportional
@@ -61,8 +61,8 @@ output; a low-weight one may not appear at all.
 The fundamental operation: turn an array of weights into a multiset
 of `n` indices, each chosen iid with probability proportional to
 weight. This is exactly a multinomial draw on the weight distribution
-— hence the standard name **multinomial resampling**. (Other
-resampling schemes used in particle filters — systematic, residual,
+— hence the standard name **multinomial sampling**. (Other
+sampling schemes used in particle filters — systematic, residual,
 stratified — produce a different joint distribution on the output
 multiset; this crate doesn't implement those.)
 
@@ -81,12 +81,12 @@ cumulative weight array in another O(m + n) pass.
 
 ## API
 
-Two resamplers are provided.
+Two samplers are provided.
 
-- **`resample_indices(rng, weights, out)`** — streaming. One `powf`
+- **`sample_indices(rng, weights, out)`** — streaming. One `powf`
   call per output index.
 
-- **`resample_indices_buffered(rng, weights, out)`** — buffered.
+- **`sample_indices_buffered(rng, weights, out)`** — buffered.
   Generates sorted uniforms via Gamma ratios (Exp(1) draws) rather
   than `powf`. Typically ~1.3× faster on x86; more on hardware
   with a slow `powf`. Internally repurposes the `out` slice as
@@ -138,7 +138,7 @@ features = ["libm"]
 ## Performance
 
 On modern x86 with a tuned libm: `first_uniform` runs at ~10 ns/call,
-`resample_indices` at ~14 ns/step, `resample_indices_buffered` at
+`sample_indices` at ~14 ns/step, `sample_indices_buffered` at
 ~11 ns/step (`black_box`-fenced microbench, scalar per-call cost,
 SmallRng/Xoshiro256++). On Cortex-M4F the buffered variant is
 expected to win by a larger margin than on x86 because scalar
@@ -155,7 +155,7 @@ cargo test --release
 ```
 
 Ten statistical tests checking `first_uniform`, `SortedUniforms`,
-and both resamplers against analytic CDFs, moment formulae, and an
+and both samplers against analytic CDFs, moment formulae, and an
 independent oracle, using one-sample KS, two-sample KS, and chi-
 squared statistics. Thresholds are calibrated so the aggregate
 random-failure probability under correct code is **< 1e-9** (RNG
@@ -171,7 +171,7 @@ cargo bench
 Builds with `harness = false` (so it's a regular `fn main()`, not
 the unstable `#[bench]` harness) and runs a hand-rolled
 `black_box`-fenced timing loop for `first_uniform` and the full
-resampling pipeline. See `INTERNALS.md` §5.5 for methodology and
+sampling pipeline. See `INTERNALS.md` §5.5 for methodology and
 §6 for typical numbers.
 
 ## Technical details

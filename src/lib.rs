@@ -7,16 +7,16 @@
 //!
 //! # API at a glance
 //!
-//! - [`resample_indices`] — the main entry point. Draws `out.len()`
+//! - [`sample_indices`] — the main entry point. Draws `out.len()`
 //!   indices into `weights` iid with replacement, each with
 //!   probability proportional to its weight. Output is in ascending
 //!   order. Streaming: one `powf` call per output index.
-//! - [`resample_indices_buffered`] — same signature and statistical
+//! - [`sample_indices_buffered`] — same signature and statistical
 //!   contract, typically ~1.32× faster on x86 (more on hardware with
 //!   a slow `powf`).
 //! - [`SortedUniforms`] — iterator yielding `n` Uniform(0, 1) variates
 //!   in ascending order in O(n) time. Useful in its own right outside
-//!   resampling (e.g. inverse-CDF sampling where you want sorted
+//!   sampling (e.g. inverse-CDF sampling where you want sorted
 //!   output).
 //! - [`first_uniform`] — low-level per-step primitive used by
 //!   [`SortedUniforms`]. Samples the minimum of `k` iid Uniform(0, 1)
@@ -167,7 +167,7 @@ impl<'a, R: Rng + ?Sized> ExactSizeIterator for SortedUniforms<'a, R> {}
 impl<'a, R: Rng + ?Sized> FusedIterator for SortedUniforms<'a, R> {}
 
 // ---------------------------------------------------------------------------
-// resample (streaming and buffered)
+// sampling (streaming and buffered)
 // ---------------------------------------------------------------------------
 
 // Kahan compensated add: `*sum += x` with running compensator `*c`.
@@ -182,9 +182,9 @@ fn kahan_add(sum: &mut f32, c: &mut f32, x: f32) {
     *sum = t;
 }
 
-/// Resample `out.len()` indices from `weights`, with each index
+/// Sample `out.len()` indices from `weights`, with each index
 /// drawn iid (with replacement) with probability proportional to
-/// its weight ("multinomial resampling"). Output is in ascending
+/// its weight ("multinomial sampling"). Output is in ascending
 /// order; permute `out` afterward if you need it shuffled.
 ///
 /// Streaming variant: runs in O(`weights.len()` + `out.len()`)
@@ -201,14 +201,14 @@ fn kahan_add(sum: &mut f32, c: &mut f32, x: f32) {
 /// undefined (but memory-safe) output in release.
 ///
 /// # See also
-/// [`resample_indices_buffered`] — same signature and statistical
+/// [`sample_indices_buffered`] — same signature and statistical
 /// contract, typically ~1.32× faster on x86 (more on hardware with
 /// a slow `powf`).
 ///
 /// # Panics
 /// Panics in debug if preconditions are violated. Always panics if
 /// `weights.is_empty()`.
-pub fn resample_indices<R: Rng + ?Sized>(rng: &mut R, weights: &[f32], out: &mut [u32]) {
+pub fn sample_indices<R: Rng + ?Sized>(rng: &mut R, weights: &[f32], out: &mut [u32]) {
     assert!(!weights.is_empty(), "weights must be nonempty");
     debug_assert!(
         weights.len() <= u32::MAX as usize,
@@ -256,8 +256,8 @@ pub fn resample_indices<R: Rng + ?Sized>(rng: &mut R, weights: &[f32], out: &mut
     }
 }
 
-/// Buffered weighted resampler: same statistical contract and
-/// signature as [`resample_indices`], typically ~1.32× faster on
+/// Buffered weighted sampler: same statistical contract and
+/// signature as [`sample_indices`], typically ~1.32× faster on
 /// x86 (more on hardware with a slow `powf`).
 ///
 /// Generates sorted uniforms via the Gamma-ratio identity
@@ -280,7 +280,7 @@ pub fn resample_indices<R: Rng + ?Sized>(rng: &mut R, weights: &[f32], out: &mut
 /// # Panics
 /// Panics if `weights.is_empty()`. Panics in debug if weights are
 /// non-finite/negative or sum to zero.
-pub fn resample_indices_buffered<R: Rng + ?Sized>(rng: &mut R, weights: &[f32], out: &mut [u32]) {
+pub fn sample_indices_buffered<R: Rng + ?Sized>(rng: &mut R, weights: &[f32], out: &mut [u32]) {
     assert!(!weights.is_empty(), "weights must be nonempty");
     debug_assert!(
         weights.len() <= u32::MAX as usize,

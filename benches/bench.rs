@@ -16,7 +16,7 @@
 //! micro-architecture (which is a property of the libm, not the
 //! call site).
 
-use ltsis::{first_uniform, resample_indices, resample_indices_buffered};
+use ltsis::{first_uniform, sample_indices, sample_indices_buffered};
 use rand::rngs::SmallRng;
 use rand::SeedableRng;
 use std::hint::black_box;
@@ -26,7 +26,7 @@ fn main() {
     println!("=== ltsis microbenchmark ===\n");
     bench_first_uniform();
     println!();
-    bench_resample();
+    bench_sample();
 }
 
 fn bench_first_uniform() {
@@ -45,8 +45,8 @@ fn bench_first_uniform() {
     println!("      conclusions.");
 }
 
-fn bench_resample() {
-    println!("[Bench] Full resampling pipeline (m = n)");
+fn bench_sample() {
+    println!("[Bench] Full sampling pipeline (m = n)");
     println!(
         "  {:>8}  {:>14}  {:>14}  {:>14}  {:>14}  {:>10}",
         "m = n", "C ns/call", "C ns/step", "B ns/call", "B ns/step", "C/B"
@@ -62,11 +62,11 @@ fn bench_resample() {
         // Streaming.
         let mut rng_c = SmallRng::seed_from_u64(0x1234);
         for _ in 0..3 {
-            resample_indices(&mut rng_c, &weights, &mut out);
+            sample_indices(&mut rng_c, &weights, &mut out);
         }
         let t0 = Instant::now();
         for _ in 0..n_runs {
-            resample_indices(
+            sample_indices(
                 black_box(&mut rng_c),
                 black_box(&weights),
                 black_box(&mut out),
@@ -79,11 +79,11 @@ fn bench_resample() {
         // Buffered.
         let mut rng_b = SmallRng::seed_from_u64(0x1234);
         for _ in 0..3 {
-            resample_indices_buffered(&mut rng_b, &weights, &mut out);
+            sample_indices_buffered(&mut rng_b, &weights, &mut out);
         }
         let t0 = Instant::now();
         for _ in 0..n_runs {
-            resample_indices_buffered(
+            sample_indices_buffered(
                 black_box(&mut rng_b),
                 black_box(&weights),
                 black_box(&mut out),

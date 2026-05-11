@@ -1,10 +1,10 @@
 //! Runnable version of the README Quick Start.
 //!
 //! `cargo run --example quick_start` builds and runs this. Prints
-//! a histogram of the resampled indices and a sanity-check ratio
+//! a histogram of the sampled indices and a sanity-check ratio
 //! against the input weights.
 
-use ltsis::resample_indices;
+use ltsis::sample_indices;
 use rand::SeedableRng;
 
 fn main() {
@@ -13,9 +13,9 @@ fn main() {
     // Some weighted population. Weights need not be normalized.
     let weights = vec![1.0_f32, 3.0, 2.0, 4.0];
 
-    // Resample 1000 indices from this distribution.
+    // Sample 1000 indices from this distribution.
     let mut out = vec![0_u32; 1000];
-    resample_indices(&mut rng, &weights, &mut out);
+    sample_indices(&mut rng, &weights, &mut out);
 
     // Tally how often each index appears.
     let mut counts = vec![0_u32; weights.len()];
@@ -39,7 +39,7 @@ fn main() {
     // To use these as slice indices, cast to usize:
     //
     //   let particles: Vec<MyParticle> = ...;
-    //   let resampled: Vec<MyParticle> =
+    //   let sampled: Vec<MyParticle> =
     //       out.iter().map(|&i| particles[i as usize].clone()).collect();
     //
     // For a particle filter, this is the "refresh the population"

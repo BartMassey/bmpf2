@@ -8,7 +8,7 @@
 //!
 //! Methodology is documented in `INTERNALS.md` §5.4.
 
-use ltsis::{first_uniform, resample_indices, resample_indices_buffered, SortedUniforms};
+use ltsis::{first_uniform, sample_indices, sample_indices_buffered, SortedUniforms};
 use rand::rngs::SmallRng;
 use rand::{Rng, RngExt, SeedableRng};
 
@@ -79,10 +79,10 @@ fn weights_from_f64(ws: &[f64]) -> Vec<f32> {
     ws.iter().map(|&w| w as f32).collect()
 }
 
-/// Naive multinomial resampler (f64-internal): for each output, draw
+/// Naive multinomial sampler (f64-internal): for each output, draw
 /// a uniform on [0, total) and binary-search the cumulative-weight
 /// array. O(m + n log m). The trusted reference for the chi-squared
-/// resampler-vs-multinomial comparison.
+/// sampler-vs-multinomial comparison.
 fn naive_multinomial<R: Rng + ?Sized>(rng: &mut R, weights: &[f32], out: &mut [u32]) {
     let mut cum = vec![0.0_f64; weights.len()];
     let mut t = 0.0_f64;
@@ -322,10 +322,10 @@ fn sorted_uniforms_pooled_ks() {
 }
 
 // ---------------------------------------------------------------------------
-// Resampler tests
+// Sampler tests
 // ---------------------------------------------------------------------------
 
-fn resample_marginals<R>(method: &str, mut resample: R)
+fn sample_marginals<R>(method: &str, mut sample_fn: R)
 where
     R: FnMut(&mut SmallRng, &[f32], &mut [u32]),
 {
@@ -354,7 +354,7 @@ where
         let mut counts = vec![0u64; m];
         let mut buf = vec![0u32; n_per_run];
         for _ in 0..n_runs {
-            resample(&mut rng, &weights, &mut buf);
+            sample_fn(&mut rng, &weights, &mut buf);
             for &idx in &buf {
                 counts[idx as usize] += 1;
             }
@@ -387,16 +387,16 @@ where
 }
 
 #[test]
-fn resample_marginals_streaming() {
-    resample_marginals("streaming", resample_indices);
+fn sample_marginals_streaming() {
+    sample_marginals("streaming", sample_indices);
 }
 
 #[test]
-fn resample_marginals_buffered() {
-    resample_marginals("buffered", resample_indices_buffered);
+fn sample_marginals_buffered() {
+    sample_marginals("buffered", sample_indices_buffered);
 }
 
-fn resample_vs_multinomial<R>(method: &str, mut resample: R)
+fn sample_vs_multinomial<R>(method: &str, mut sample_fn: R)
 where
     R: FnMut(&mut SmallRng, &[f32], &mut [u32]),
 {
@@ -423,7 +423,7 @@ where
         let mut buf = vec![0u32; n_per_run];
 
         for _ in 0..n_runs {
-            resample(&mut rng_a, &weights, &mut buf);
+            sample_fn(&mut rng_a, &weights, &mut buf);
             for &idx in &buf {
                 counts_a[idx as usize] += 1;
             }
@@ -462,11 +462,11 @@ where
 }
 
 #[test]
-fn resample_vs_multinomial_streaming() {
-    resample_vs_multinomial("streaming", resample_indices);
+fn sample_vs_multinomial_streaming() {
+    sample_vs_multinomial("streaming", sample_indices);
 }
 
 #[test]
-fn resample_vs_multinomial_buffered() {
-    resample_vs_multinomial("buffered", resample_indices_buffered);
+fn sample_vs_multinomial_buffered() {
+    sample_vs_multinomial("buffered", sample_indices_buffered);
 }
