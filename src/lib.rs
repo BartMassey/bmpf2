@@ -1,5 +1,5 @@
 //! Sequential Importance Sampling (SIS) primitives — multinomial
-//! sampling with replacement, in $O(n)$ time.
+//! sampling with replacement, in O(n) time.
 //!
 //! See `README.md` for a tutorial introduction and `INTERNALS.md` for
 //! the algorithm specification, math proofs, and floating-point
@@ -8,21 +8,20 @@
 //! # API at a glance
 //!
 //! - [`sample_indices`] — the main entry point. Returns an iterator
-//!   yielding $n$ indices into `weights` iid with replacement, each
+//!   yielding `n` indices into `weights` iid with replacement, each
 //!   with probability proportional to its weight. Output is in
 //!   ascending order. Streaming: one `powf` call per yielded index.
 //! - [`sample_indices_buffered`] — buffered variant, typically
 //!   ~1.32× faster on x86 (more on hardware with a slow `powf`).
 //!   Takes an `&mut [u32]` buffer rather than returning an iterator
 //!   (it uses the buffer as f32 scratch).
-//! - [`SortedUniforms`] — iterator yielding $n$ $\mathrm{Uniform}(0, 1)$
-//!   variates in ascending order in $O(n)$ time. Useful in its own
-//!   right outside sampling (e.g. inverse-CDF sampling where you
-//!   want sorted output).
+//! - [`SortedUniforms`] — iterator yielding `n` Uniform(0, 1) variates
+//!   in ascending order in O(n) time. Useful in its own right outside
+//!   sampling (e.g. inverse-CDF sampling where you want sorted
+//!   output).
 //! - [`first_uniform`] — low-level per-step primitive used by
-//!   [`SortedUniforms`]. Samples $\min(U_1, \ldots, U_k)$ for $k$
-//!   iid $\mathrm{Uniform}(0, 1)$ (equivalently, $\mathrm{Beta}(1, k)$).
-//!   Most callers won't touch this directly.
+//!   [`SortedUniforms`]. Samples the minimum of `k` iid Uniform(0, 1)
+//!   draws (≡ `Beta(1, k)`). Most callers won't touch this directly.
 //!
 //! Indices are yielded/written as `u32`, not `usize`, so the API has
 //! the same layout on every platform. Callers cast to `usize` at the
@@ -69,13 +68,12 @@ use rand_distr::{Distribution, Exp1};
 // first_uniform
 // ---------------------------------------------------------------------------
 
-/// Draw a sample distributed as $\min(U_1, \ldots, U_k)$ for $k$
-/// iid $\mathrm{Uniform}(0, 1)$ variates (equivalently,
-/// $\mathrm{Beta}(1, k)$ in standard notation).
+/// Draw a sample distributed as the minimum of `k` iid Uniform(0, 1)
+/// variates (equivalently, `Beta(1, k)` in standard notation).
 ///
 /// Computed in closed form via the inverse CDF
-/// $F^{-1}(u) = 1 - (1 - u)^{1/k}$. One `powf` call per invocation;
-/// constant time in $k$.
+/// `F⁻¹(u) = 1 − (1 − u)^(1/k)`. One `powf` call per invocation;
+/// constant time in `k`.
 ///
 /// This is the per-step primitive driving the order-statistic
 /// recurrence in [`SortedUniforms`]. Most callers won't need this
@@ -104,18 +102,17 @@ pub fn first_uniform<R: Rng + ?Sized>(rng: &mut R, k: u32) -> f32 {
 // SortedUniforms
 // ---------------------------------------------------------------------------
 
-/// Streaming iterator yielding $n$ $\mathrm{Uniform}(0, 1)$ variates
-/// in ascending order in $O(n)$ time.
+/// Streaming iterator yielding `n` Uniform(0, 1) variates in ascending
+/// order in O(n) time.
 ///
 /// The yielded values are distributed exactly as the order statistics
-/// $U_{(1)} \le U_{(2)} \le \cdots \le U_{(n)}$ of $n$ iid
-/// $\mathrm{Uniform}(0, 1)$ draws — i.e. the same as drawing $n$ iid
+/// of `n` iid Uniform(0, 1) draws — i.e. the same as drawing `n` iid
 /// uniforms and sorting them, but produced one at a time without a
 /// sort. Internally uses the Bentley–Saxe spacings recurrence
-/// $U_{(i)} = U_{(i-1)} + (1 - U_{(i-1)}) \cdot Z$ with
-/// $Z \sim \mathrm{Beta}(1, n - i + 1)$ supplied by [`first_uniform`].
+/// `U_(i) = U_(i-1) + (1 − U_(i-1)) · Z` with `Z ~ Beta(1, n − i + 1)`
+/// supplied by [`first_uniform`].
 ///
-/// Holds a mutable reference to the RNG. Yields exactly $n$ values,
+/// Holds a mutable reference to the RNG. Yields exactly `n` values,
 /// then `None` thereafter.
 ///
 /// See `INTERNALS.md` §3.1 / §5.1 for the algorithm and its
@@ -193,15 +190,15 @@ fn kahan_add(sum: &mut f32, c: &mut f32, x: f32) {
     *sum = t;
 }
 
-/// Build an iterator yielding $n$ indices into `weights`, each
+/// Build an iterator yielding `n` indices into `weights`, each
 /// drawn iid (with replacement) with probability proportional to
 /// its weight ("multinomial sampling"). Indices are yielded in
 /// ascending order; collect into a `Vec` and shuffle afterward if
 /// you need them in random order.
 ///
-/// Streaming variant: runs in $O(m + n)$ total (where
-/// $m$ = `weights.len()`), allocates nothing, and uses one
-/// [`first_uniform`] call (one `powf`) per yielded index.
+/// Streaming variant: runs in O(`weights.len()` + `n`) total,
+/// allocates nothing, and uses one [`first_uniform`] call (one
+/// `powf`) per yielded index.
 ///
 /// # Preconditions
 /// - `weights` is nonempty.
@@ -307,16 +304,12 @@ impl<'a, R: Rng + ?Sized> FusedIterator for SampleIndices<'a, R> {}
 /// hardware with a slow `powf`).
 ///
 /// Generates sorted uniforms via the Gamma-ratio identity
-///
-/// $$
-/// U_{(i)} = \frac{E_1 + \cdots + E_i}{E_1 + \cdots + E_{n+1}},
-/// \qquad E_j \sim \mathrm{Exp}(1) \text{ iid}
-/// $$
-///
-/// rather than via [`first_uniform`], avoiding the per-element
-/// `powf`. Internally repurposes `out` as scratch (each `u32` slot
-/// temporarily holds the f32 bit pattern of an $E_j$ draw via
-/// [`f32::to_bits`], later overwritten with the output index).
+/// (`U_(i) = (E_1 + ... + E_i) / (E_1 + ... + E_(n+1))` for `E_j`
+/// iid Exp(1)) rather than via [`first_uniform`], avoiding the
+/// per-element `powf`. Internally repurposes `out` as scratch
+/// (each `u32` slot temporarily holds the f32 bit pattern of an
+/// `E_j` draw via [`f32::to_bits`], later overwritten with the
+/// output index).
 ///
 /// See `INTERNALS.md` §4.4 for the algorithm and §5.2 for the
 /// `target.min(total)` clip that keeps the merge bounded.
