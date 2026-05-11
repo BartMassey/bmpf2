@@ -634,6 +634,24 @@ target measurements yet.
 
 ## 7. Future directions
 
+### 7.0. Note on splitting streaming/buffered into separate Cargo features
+
+A natural-looking refactor would expose the streaming and buffered
+samplers under separate Cargo features, on the theory that a
+buffered-only `no_std` build could then drop `num-traits` (and
+hence `libm`). It does not work: `rand_distr` 0.6 declares its
+`num-traits` dependency with `default-features = false, features =
+["libm"]` *unconditionally*, so as long as we use `Exp1` (or any
+other `rand_distr` sampler) we transitively depend on `num-traits`
+with the `libm` feature on. `cargo tree --no-default-features
+--features libm` confirms this — `libm` v0.2 appears under
+`num-traits` regardless of which `ltsis` feature we pick.
+
+Conclusion: the refactor would change the public API surface
+without removing any actual dependency. Not worth doing unless
+either we drop `Exp1` (replace with our own Ziggurat) or
+`rand_distr` changes its dependency-feature wiring.
+
 ### 7.1. Padé[m/m] rational squeeze for `first_uniform`
 
 The library currently spends one `powf` per `first_uniform` call.
