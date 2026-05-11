@@ -13,8 +13,10 @@ use rand::{Rng, RngExt};
 /// Draw a sample distributed as the minimum of `k` iid Uniform(0, 1)
 /// variates (equivalently, `Beta(1, k)` in standard notation).
 ///
-/// The per-step primitive driving the order-statistic recurrence in
-/// [`crate::SortedUniforms`]. Most callers won't need this directly.
+/// This is the per-step primitive driving the
+/// order-statistic recurrence in
+/// [`crate::SortedUniforms`]. Most callers won't need this
+/// directly.
 ///
 /// # Panics
 /// Panics if `k == 0`.

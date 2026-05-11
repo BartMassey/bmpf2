@@ -1,5 +1,5 @@
-//! Sequential Importance Resampling (SIR) primitives — multinomial
-//! resampling with replacement, in O(n) time.
+//! Sequential Importance Sampling (SIS) primitives — multinomial
+//! sampling with replacement, in O(n) time.
 //!
 //! See `README.md` for a tutorial introduction and `INTERNALS.md` for
 //! the algorithm specification, math proofs, and floating-point

@@ -1,11 +1,11 @@
-# `ltsis` — Sequential Importance Resampling primitives
+# `ltsis` — linear-time Sequential Importance Sampling primitives
 
 [![Crates.io](https://img.shields.io/crates/v/ltsis.svg)](https://crates.io/crates/ltsis)
 [![Documentation](https://docs.rs/ltsis/badge.svg)](https://docs.rs/ltsis)
 [![CI](https://github.com/BartMassey/ltsis/actions/workflows/ci.yml/badge.svg)](https://github.com/BartMassey/ltsis/actions/workflows/ci.yml)
 [![License: MIT OR Apache-2.0](https://img.shields.io/crates/l/ltsis.svg)](#license)
 
-A Rust library for **Sequential Importance Resampling (SIR) with
+A Rust library for **Sequential Importance Sampling (SIS) with
 replacement** — also known as **multinomial resampling** — the
 weighted-resampling step at the heart of Bayesian particle filters
 and other sequential Monte Carlo methods. Given an array of `n`
@@ -36,18 +36,27 @@ resample_indices(&mut rng, &weights, &mut out);
 //   let particle = particles[out[i] as usize];
 ```
 
-## Background: Sequential Importance Resampling
+## Background: Sequential Importance Sampling
 
-In a Bayesian particle filter you carry a population of `n` candidate
-states ("particles"), each with a weight that reflects how plausible
-that state is given the data observed so far. As more data arrives,
-the weights skew: most of the population ends up with negligible
-weight, while a handful of particles dominate. **Resampling** refreshes
-the population by drawing `n` new particles — each a copy of one of
-the old ones, **with replacement** — where each old particle's chance
-of being copied is proportional to its weight. Because draws are with
-replacement, a high-weight particle typically appears multiple times
-in the output; a low-weight one may not appear at all.
+Sequential Importance Sampling (SIS) samples a distribution
+by drawing `n` new samples from a distribution of `m` old
+ones. The old samples have associated weights: SIS selects
+each new sample independently from the old distribution,
+with a sample having selection probability proportional to
+the weight.
+
+For example, in a Bayesian particle filter you carry a
+population of `n` candidate states ("particles"), each with
+a weight that reflects how plausible that state is given the
+data observed so far. As more data arrives, the weights
+skew: most of the population ends up with negligible weight,
+while a handful of particles dominate. **Resampling**
+refreshes the population by drawing `n` new particles — each
+a copy of one of the old ones, **with replacement** — where
+each old particle's chance of being copied is proportional
+to its weight. Because draws are with replacement, a
+high-weight particle typically appears multiple times in the
+output; a low-weight one may not appear at all.
 
 The fundamental operation: turn an array of weights into a multiset
 of `n` indices, each chosen iid with probability proportional to
@@ -55,40 +64,48 @@ weight. This is exactly a multinomial draw on the weight distribution
 — hence the standard name **multinomial resampling**. (Other
 resampling schemes used in particle filters — systematic, residual,
 stratified — produce a different joint distribution on the output
-multiset; this crate doesn't implement those. If you want one of the
-others, this isn't the crate for you.)
+multiset; this crate doesn't implement those.)
 
-The naive way takes O(n log n) time (cumulative sum + binary search
-per output) or O(n²) (scan per output). This crate runs in O(m + n) —
-where `m = weights.len()` and `n = out.len()` — using a trick due to
-Massey (2008): generate `n` sorted uniforms in `[0, 1)` in one O(n)
-pass, then merge them against the cumulative weight array in another
-O(m + n) pass.
+When implemented naïvely, SIS takes O(n·m) time to produce n
+samples from m weights: the textbook inverse-CDF construction
+walks the weight array once per output, accumulating a prefix
+sum until it crosses a uniform threshold (an O(m) operation
+per sample on average).
+
+Precomputing the cumulative-weight array up front and binary-
+searching it brings the per-sample cost down to O(log m), for
+O(m + n log m) total. This crate runs in O(m + n) — using a
+trick due to Massey (2008): generate `n` sorted uniforms in
+`[0, 1)` in one O(n) pass, then merge them against the
+cumulative weight array in another O(m + n) pass.
 
 ## API
 
-Two resamplers, identical signatures — pick whichever fits your
-performance budget. Neither needs caller-supplied scratch.
+Two resamplers are provided.
 
 - **`resample_indices(rng, weights, out)`** — streaming. One `powf`
   call per output index.
+
 - **`resample_indices_buffered(rng, weights, out)`** — buffered.
   Generates sorted uniforms via Gamma ratios (Exp(1) draws) rather
-  than `powf`. Typically ~1.32× faster on x86; more on hardware
+  than `powf`. Typically ~1.3× faster on x86; more on hardware
   with a slow `powf`. Internally repurposes the `out` slice as
   scratch.
 
-Plus two lower-level primitives:
+These are built on two lower-level public primitives:
+
+- **`first_uniform(rng, k)`** — sample `min(U₁, ..., Uₖ)` for
+  Uk drawn iid from Uniform(0, 1). Constant time.
 
 - **`SortedUniforms::new(rng, n)`** — iterator yielding `n`
   Uniform(0, 1) variates in ascending order in O(n) time.
-- **`first_uniform(rng, k)`** — sample `min(U₁, ..., Uₖ)` for
-  k iid Uniform(0, 1) (equivalently, `Beta(1, k)`).
+  Uses `first_uniform()` internally, so constant-time per
+  iteration.
 
-Indices are written as `u32` for platform-independent layout — not
-`usize` — so callers cast at the index site
-(`particles[out[i] as usize]`). Weight arrays must therefore have
-length ≤ `u32::MAX`; debug builds assert this.
+Output indices are `u32` rather than `usize` for platform
+independence and for internal reasons; this is slightly
+inconvenient for the API user, but avoids a host of issues.
+Weight arrays must therefore have length ≤ `u32::MAX`.
 
 ## Features
 
@@ -109,8 +126,10 @@ Cortex-M4F and other single-precision FPU targets.
 ltsis = "0.1"
 
 # no_std:
-[dependencies]
-ltsis = { version = "0.1", default-features = false, features = ["libm"] }
+[dependencies.ltsis]
+version = "0.1"
+default-features = false
+features = ["libm"]
 ```
 
 [libm]: https://crates.io/crates/libm
@@ -119,8 +138,8 @@ ltsis = { version = "0.1", default-features = false, features = ["libm"] }
 ## Performance
 
 On modern x86 with a tuned libm: `first_uniform` runs at ~10 ns/call,
-`resample_indices` at ~14.4 ns/step, `resample_indices_buffered` at
-~10.9 ns/step (`black_box`-fenced microbench, scalar per-call cost,
+`resample_indices` at ~14 ns/step, `resample_indices_buffered` at
+~11 ns/step (`black_box`-fenced microbench, scalar per-call cost,
 SmallRng/Xoshiro256++). On Cortex-M4F the buffered variant is
 expected to win by a larger margin than on x86 because scalar
 `powf` is much more expensive than the Exp(1) Ziggurat there. See
@@ -129,7 +148,7 @@ expectations.
 
 ## Testing & benchmarking
 
-Integration tests:
+### Integration tests
 
 ```
 cargo test --release
@@ -143,7 +162,7 @@ random-failure probability under correct code is **< 1e-9** (RNG
 seeds fixed); methodology and threshold derivations are in
 `INTERNALS.md` §5.4.
 
-Microbenchmark:
+### Microbenchmark
 
 ```
 cargo bench
@@ -155,36 +174,33 @@ the unstable `#[bench]` harness) and runs a hand-rolled
 resampling pipeline. See `INTERNALS.md` §5.5 for methodology and
 §6 for typical numbers.
 
-## Implementation notes & math proofs
+## Technical details
 
-For the algorithm specification, the floating-point boundary
-argument that makes the merge memory-safe at f32 precision, the
-Kahan-summation rationale, the `f32::to_bits` round-trip used in
-the buffered variant, the formal correctness proofs (Lemmas 1–3,
-Theorems 1–2), and a discussion of an open Padé-rational-squeeze
-research direction, see [`INTERNALS.md`](INTERNALS.md).
+See [`INTERNALS.md`](INTERNALS.md) for a detailed discussion
+of design and implementation, including proofs and proof
+citations.
 
-## Citation
-
-If you use this crate in academic work:
+If you use this crate in academic work, you might cite
 
 > Massey, B. (2008). Fast perfect weighted resampling.
 > *Proceedings of IEEE ICASSP 2008*.
 
-(plus this crate's repo URL).
+plus this crate's repo URL.
 
 ## License
 
 Dual-licensed under either of:
 
-- Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE) or
-  <https://www.apache.org/licenses/LICENSE-2.0>)
-- MIT license ([LICENSE-MIT](LICENSE-MIT) or
-  <https://opensource.org/licenses/MIT>)
+- "Apache License, Version 2.0" ([LICENSE-APACHE](LICENSE-APACHE)).
+- "MIT license" ([LICENSE-MIT](LICENSE-MIT)).
 
-at your option.
+at your option. Please see the license files in this
+distribution for license terms.
 
-Unless you explicitly state otherwise, any contribution intentionally
-submitted for inclusion in the work by you, as defined in the
-Apache-2.0 license, shall be dual licensed as above, without any
-additional terms or conditions.
+### Contribution
+
+Unless you explicitly state otherwise, any contribution
+intentionally submitted for inclusion in the work by you, as
+defined in the Apache-2.0 license, shall be dual licensed as
+above, without any additional terms or conditions.
+

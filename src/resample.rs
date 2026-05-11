@@ -18,7 +18,7 @@
 //!
 //! Both produce the same statistical output (multinomial-distributed
 //! indices in ascending order). Pick whichever fits your performance
-//! budget; neither needs caller-supplied scratch.
+//! budget.
 //!
 //! See `INTERNALS.md` for the algorithm specification, math proofs,
 //! and floating-point correctness arguments.
